@@ -7,14 +7,14 @@
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
   "remoteUser": "vscode",
-  /*
   "remoteEnv": {
     "GH_TOKEN": "${localEnv:GH_TOKEN}"
   },
-  */
   "postCreateCommand": "if [ -f requirements.txt ]; then pip install -r requirements.txt; fi",
   "postStartCommand": "printf '%s\n' 'GH_TOKEN is not injected automatically during container setup. If you need gh authentication, export GH_TOKEN manually inside the container only when needed.'",
-  "forwardPorts": [8000],
+  "forwardPorts": [
+    8000
+  ],
   "portsAttributes": {
     "8000": {
       "label": "Python App",
@@ -23,9 +23,21 @@
   },
   "customizations": {
     "vscode": {
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.fixAll.ruff": "explicit",
+          "source.organizeImports.ruff": "explicit"
+        },
+        "python.analysis.diagnosticMode": "workspace",
+        "python.analysis.typeCheckingMode": "basic",
+        "python.analysis.autoImportCompletions": true,
+        "ruff.nativeServer": "on"
+      },
       "extensions": [
         "ms-python.python",
-        "ms-python.vscode-pylance"
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff"
       ]
     }
   }
