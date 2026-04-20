@@ -6,10 +6,10 @@
 
 | 項目 | 記録 |
 |------|------|
-| チェック実施日 | YYYY-MM-DD |
-| リポジトリ名 | |
-| 確認者 | |
-| 備考 | |
+| チェック実施日 | 2026-04-20 |
+| リポジトリ名 | try-web-browser |
+| 確認者 | self |
+| 備考 | - |
 
 ## 初期セキュリティチェック
 
@@ -24,18 +24,18 @@
 
 ### リポジトリ作成後に個別設定する項目
 
-- [ ] `Require status checks to pass` を有効にした
+- [X] `Require status checks to pass` を有効にした
   - `Settings -> Rules -> Rulesets` の対象 ruleset で有効化する
-- [ ] Actions の SHA ピンニングを有効にした
+- [X] Actions の SHA ピンニングを有効にした
   - `Settings -> Actions -> General -> Actions permissions` で `Require actions to be pinned to a full-length commit SHA` を ON にする
-- [ ] Dependabot for Actions を設定した
+- [X] Dependabot for Actions を設定した
   - `.github/dependabot.yml` に `github-actions` の更新設定が存在する
-- [ ] Code scanning が有効になっていることを確認した（Public リポジトリの場合）
+- [X] Code scanning が有効になっていることを確認した（Public リポジトリの場合）
   - `Security -> Code scanning` で Code scanning が有効であることを確認する
   - `.github/workflows/codeql-analysis.yml` が存在することを確認する
-- [ ] `.gitignore` をプロジェクト特性に合わせてカスタマイズした
+- [X] `.gitignore` をプロジェクト特性に合わせてカスタマイズした
   - 使用する言語・ツールの生成物、ローカル設定、秘密情報が適切に除外されることを確認する
-- [ ] ワークフローの `GITHUB_TOKEN` 権限を最小化した
+- [X] ワークフローの `GITHUB_TOKEN` 権限を最小化した
   - `Settings -> Actions -> General -> Workflow permissions` で `Read repository contents and packages permissions` を選択する
   - 各ワークフローでも `permissions: contents: read` など必要最小限を明示する
 - [ ] Environment protection rules を設定した
