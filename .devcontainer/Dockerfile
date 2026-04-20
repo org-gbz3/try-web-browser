@@ -1,3 +1,3 @@
-FROM mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm
+FROM mcr.microsoft.com/devcontainers/python:1-3.12-bookworm
 
 WORKDIR /workspaces

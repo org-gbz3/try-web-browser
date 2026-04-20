@@ -26,3 +26,31 @@ Thumbs.db
 
 # Generic caches
 .cache/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode and cache directories
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Coverage and test artifacts
+.coverage
+.coverage.*
+htmlcov/
+
+# Packaging artifacts
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/

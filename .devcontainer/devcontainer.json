@@ -6,26 +6,38 @@
   "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-  "remoteUser": "node",
-  /*
+  "remoteUser": "vscode",
   "remoteEnv": {
     "GH_TOKEN": "${localEnv:GH_TOKEN}"
   },
-  */
-  "postCreateCommand": "if [ -f package.json ]; then npm install; fi",
+  "postCreateCommand": "if [ -f requirements.txt ]; then pip install -r requirements.txt; fi",
   "postStartCommand": "printf '%s\n' 'GH_TOKEN is not injected automatically during container setup. If you need gh authentication, export GH_TOKEN manually inside the container only when needed.'",
-  "forwardPorts": [5173],
+  "forwardPorts": [
+    8000
+  ],
   "portsAttributes": {
-    "5173": {
-      "label": "Vite Dev Server",
-      "onAutoForward": "openPreview"
+    "8000": {
+      "label": "Python App",
+      "onAutoForward": "notify"
     }
   },
   "customizations": {
     "vscode": {
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.fixAll.ruff": "explicit",
+          "source.organizeImports.ruff": "explicit"
+        },
+        "python.analysis.diagnosticMode": "workspace",
+        "python.analysis.typeCheckingMode": "basic",
+        "python.analysis.autoImportCompletions": true,
+        "ruff.nativeServer": "on"
+      },
       "extensions": [
-        "svelte.svelte-vscode",
-        "esbenp.prettier-vscode"
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff"
       ]
     }
   }
