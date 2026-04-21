@@ -1,19 +1,26 @@
 import socket
-import sys
-import tkinter as tk
 
 
 class URL:
-
     def __init__(self, url: str):
         self.schme, url = url.split("://", 1)
-        assert self.schme in ("http")
+
+        assert self.schme in ["http", "https"]
+
+        if self.schme == "http":
+            self.port = 80
+        if self.schme == "https":
+            self.port = 443
 
         if "/" not in url:
             url = url + "/"
 
         self.host, url = url.split("/", 1)
         self.path = "/" + url
+
+        if ":" in self.host:
+            self.host, port = self.host.split(":", 1)
+            self.port = int(port)
 
     def request(self):
         s = socket.socket(
@@ -22,7 +29,13 @@ class URL:
             proto=socket.IPPROTO_TCP,
         )
 
-        s.connect((self.host, 12345))
+        s.connect((self.host, self.port))
+
+        if self.schme == "https":
+            import ssl
+            ctx = ssl.create_default_context()
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            s = ctx.wrap_socket(s, server_hostname=self.host)
 
         request = "GET {} HTTP/1.0\r\n".format(self.path)
         request += "Host: {}\r\n".format(self.host)
@@ -44,41 +57,31 @@ class URL:
             header, value = line.split(":", 1)
             response_headers[header.casefold()] = value.strip()
 
-            assert "transfer-encoding" not in response_headers
-            assert "content-encoding" not in response_headers
+        assert "transfer-encoding" not in response_headers
+        assert "content-encoding" not in response_headers
 
-            content = response.read()
-            s.close()
+        content = response.read()
+        s.close()
 
-            return content
+        return content
 
 
-def show_tk_window():
-    root = tk.Tk()
-    root.title("URL Tk Probe")
-    root.geometry("520x220")
+def show(body):
+    in_tag = False
+    for c in body:
+        if c == "<":
+            in_tag = True
+        elif c == ">":
+            in_tag = False
+        elif not in_tag:
+            print(c, end="")
 
-    label = tk.Label(
-        root,
-        text=(
-            "If GUI forwarding works, this Tk window should be visible on the host.\n\n"
-            "Close this window or press the button below to exit."
-        ),
-        justify="center",
-        padx=24,
-        pady=24,
-    )
-    label.pack(expand=True, fill="both")
 
-    button = tk.Button(root, text="Close", command=root.destroy)
-    button.pack(pady=(0, 24))
-
-    root.mainloop()
+def load(url):
+    body = url.request()
+    show(body)
 
 
 if __name__ == "__main__":
-    try:
-        show_tk_window()
-    except tk.TclError as error:
-        print(f"Failed to open Tk window: {error}", file=sys.stderr)
-        raise
+    import sys
+    load(URL(sys.argv[1]))
