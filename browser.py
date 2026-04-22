@@ -1,4 +1,5 @@
 import base64
+import html
 import socket
 from urllib.parse import unquote_to_bytes
 
@@ -103,13 +104,18 @@ class URL:
 
 def show(body):
     in_tag = False
+    visible_chars = []
+
     for c in body:
         if c == "<":
             in_tag = True
         elif c == ">":
             in_tag = False
         elif not in_tag:
-            print(c, end="")
+            visible_chars.append(c)
+
+    visible_text = html.unescape("".join(visible_chars))
+    print(visible_text)
 
 
 def load(url):
