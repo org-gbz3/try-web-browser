@@ -105,6 +105,7 @@ class URL:
 
 WIDTH, HEIGHT = 800, 600
 HSTEP, VSTEP = 13, 18
+SCROLL_STEP = 100
 
 
 class Browser:
@@ -116,20 +117,25 @@ class Browser:
             height=HEIGHT,
         )
         self.canvas.pack()
+        self.scroll = 0
+
+        # 下矢印キーに scrolldown メソッドをバインド
+        self.window.bind("<Down>", self.scrolldown)
+
+    def scrolldown(self, event):
+        self.scroll += SCROLL_STEP
+        self.draw()
+
+    def draw(self):
+        self.canvas.delete("all")
+        for x, y, c in self.display_list:
+            self.canvas.create_text(x, y - self.scroll, text=c)
 
     def load(self, url):
         body = url.request()
         text = lex(body)
-
-        cursor_x, cursor_y = HSTEP, VSTEP
-        for c in text:
-            self.canvas.create_text(cursor_x, cursor_y, text=c)
-            cursor_x += HSTEP
-
-            # カーソルが右端を超えたら改行
-            if cursor_x >= WIDTH - HSTEP:
-                cursor_x = HSTEP
-                cursor_y += VSTEP
+        self.display_list = layout(text)
+        self.draw()
 
 
 def lex(body):
@@ -144,6 +150,21 @@ def lex(body):
             text += c
 
     return html.unescape(text)
+
+
+def layout(text):
+    display_list = []
+    cursor_x, cursor_y = HSTEP, VSTEP
+    for c in text:
+        display_list.append((cursor_x, cursor_y, c))
+        cursor_x += HSTEP
+
+        # カーソルが右端を超えたら改行
+        if cursor_x >= WIDTH - HSTEP:
+            cursor_x = HSTEP
+            cursor_y += VSTEP
+
+    return display_list
 
 
 if __name__ == "__main__":
