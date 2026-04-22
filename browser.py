@@ -1,6 +1,7 @@
 import base64
 import html
 import socket
+import tkinter as tk
 from urllib.parse import unquote_to_bytes
 
 
@@ -102,6 +103,25 @@ class URL:
         return data_bytes.decode(charset, errors="replace")
 
 
+WIDTH, HEIGHT = 800, 600
+
+
+class Browser:
+    def __init__(self):
+        self.window = tk.Tk()
+        self.canvas = tk.Canvas(
+            self.window,
+            width=WIDTH,
+            height=HEIGHT,
+        )
+        self.canvas.pack()
+
+    def load(self, url):
+        self.canvas.create_rectangle(10, 20, 400, 300)
+        self.canvas.create_oval(100, 100, 150, 150)
+        self.canvas.create_text(200, 150, text="Hi!")
+
+
 def show(body):
     in_tag = False
     visible_chars = []
@@ -125,4 +145,5 @@ def load(url):
 
 if __name__ == "__main__":
     import sys
-    load(URL(sys.argv[1]))
+    Browser().load(URL(sys.argv[1]))
+    tk.mainloop()
