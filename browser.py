@@ -71,7 +71,7 @@ class URL:
             header, value = line.split(":", 1)
             response_headers[header.casefold()] = value.strip()
 
-        assert "transfer-encoding" not in response_headers
+        # assert "transfer-encoding" not in response_headers
         assert "content-encoding" not in response_headers
 
         content = response.read()
@@ -104,6 +104,7 @@ class URL:
 
 
 WIDTH, HEIGHT = 800, 600
+HSTEP, VSTEP = 13, 18
 
 
 class Browser:
@@ -117,30 +118,32 @@ class Browser:
         self.canvas.pack()
 
     def load(self, url):
-        self.canvas.create_rectangle(10, 20, 400, 300)
-        self.canvas.create_oval(100, 100, 150, 150)
-        self.canvas.create_text(200, 150, text="Hi!")
+        body = url.request()
+        text = lex(body)
+
+        cursor_x, cursor_y = HSTEP, VSTEP
+        for c in text:
+            self.canvas.create_text(cursor_x, cursor_y, text=c)
+            cursor_x += HSTEP
+
+            # カーソルが右端を超えたら改行
+            if cursor_x >= WIDTH - HSTEP:
+                cursor_x = HSTEP
+                cursor_y += VSTEP
 
 
-def show(body):
+def lex(body):
+    text = ""
     in_tag = False
-    visible_chars = []
-
     for c in body:
         if c == "<":
             in_tag = True
         elif c == ">":
             in_tag = False
         elif not in_tag:
-            visible_chars.append(c)
+            text += c
 
-    visible_text = html.unescape("".join(visible_chars))
-    print(visible_text)
-
-
-def load(url):
-    body = url.request()
-    show(body)
+    return html.unescape(text)
 
 
 if __name__ == "__main__":
