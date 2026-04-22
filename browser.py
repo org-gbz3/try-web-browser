@@ -1,6 +1,8 @@
 import base64
 import html
 import socket
+import tkinter as tk
+import tkinter.font
 from urllib.parse import unquote_to_bytes
 
 
@@ -70,7 +72,7 @@ class URL:
             header, value = line.split(":", 1)
             response_headers[header.casefold()] = value.strip()
 
-        assert "transfer-encoding" not in response_headers
+        # assert "transfer-encoding" not in response_headers
         assert "content-encoding" not in response_headers
 
         content = response.read()
@@ -102,27 +104,80 @@ class URL:
         return data_bytes.decode(charset, errors="replace")
 
 
-def show(body):
+def lex(body):
+    text = ""
     in_tag = False
-    visible_chars = []
-
     for c in body:
         if c == "<":
             in_tag = True
         elif c == ">":
             in_tag = False
         elif not in_tag:
-            visible_chars.append(c)
+            text += c
 
-    visible_text = html.unescape("".join(visible_chars))
-    print(visible_text)
+    return html.unescape(text)
 
 
-def load(url):
-    body = url.request()
-    show(body)
+WIDTH, HEIGHT = 800, 600
+HSTEP, VSTEP = 13, 18
+
+
+def layout(text):
+    font = tkinter.font.Font()
+    display_list = []
+    cursor_x, cursor_y = HSTEP, VSTEP
+    for word in text.split():
+        w = font.measure(word)
+
+        # カーソルが右端を超えたら改行
+        if cursor_x + w > WIDTH - HSTEP:
+            cursor_y += font.metrics("linespace") * 1.25
+            cursor_x = HSTEP
+
+        display_list.append((cursor_x, cursor_y, word))
+        cursor_x += w + font.measure(" ")
+
+    return display_list
+
+
+SCROLL_STEP = 100
+
+
+class Browser:
+    def __init__(self):
+        self.window = tk.Tk()
+        self.canvas = tk.Canvas(
+            self.window,
+            width=WIDTH,
+            height=HEIGHT,
+        )
+        self.canvas.pack()
+        self.scroll = 0
+
+        # 下矢印キーに scrolldown メソッドをバインド
+        self.window.bind("<Down>", self.scrolldown)
+
+    def draw(self):
+        self.canvas.delete("all")
+        for x, y, c in self.display_list:
+            if y > self.scroll + HEIGHT:
+                continue
+            if y + VSTEP < self.scroll:
+                continue
+            self.canvas.create_text(x, y - self.scroll, text=c, anchor="nw")
+
+    def load(self, url):
+        body = url.request()
+        text = lex(body)
+        self.display_list = layout(text)
+        self.draw()
+
+    def scrolldown(self, event):
+        self.scroll += SCROLL_STEP
+        self.draw()
 
 
 if __name__ == "__main__":
     import sys
-    load(URL(sys.argv[1]))
+    Browser().load(URL(sys.argv[1]))
+    tk.mainloop()
