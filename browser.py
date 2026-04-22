@@ -2,6 +2,7 @@ import base64
 import html
 import socket
 import tkinter as tk
+import tkinter.font
 from urllib.parse import unquote_to_bytes
 
 
@@ -122,16 +123,19 @@ HSTEP, VSTEP = 13, 18
 
 
 def layout(text):
+    font = tkinter.font.Font()
     display_list = []
     cursor_x, cursor_y = HSTEP, VSTEP
-    for c in text:
-        display_list.append((cursor_x, cursor_y, c))
-        cursor_x += HSTEP
+    for word in text.split():
+        w = font.measure(word)
 
         # カーソルが右端を超えたら改行
-        if cursor_x >= WIDTH - HSTEP:
+        if cursor_x + w > WIDTH - HSTEP:
+            cursor_y += font.metrics("linespace") * 1.25
             cursor_x = HSTEP
-            cursor_y += VSTEP
+
+        display_list.append((cursor_x, cursor_y, word))
+        cursor_x += w + font.measure(" ")
 
     return display_list
 
@@ -160,7 +164,7 @@ class Browser:
                 continue
             if y + VSTEP < self.scroll:
                 continue
-            self.canvas.create_text(x, y - self.scroll, text=c)
+            self.canvas.create_text(x, y - self.scroll, text=c, anchor="nw")
 
     def load(self, url):
         body = url.request()
