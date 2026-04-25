@@ -3,6 +3,7 @@ import html
 import socket
 import tkinter as tk
 import tkinter.font
+from typing import Literal
 from urllib.parse import unquote_to_bytes
 
 
@@ -141,41 +142,46 @@ WIDTH, HEIGHT = 800, 600
 HSTEP, VSTEP = 13, 18
 
 
-def layout(tokens):
-    display_list = []
-    cursor_x, cursor_y = HSTEP, VSTEP
-    weight = "normal"
-    style = "roman"
-    for tok in tokens:
+class Layout:
+    def __init__(self, tokens):
+        self.display_list = []
+        self.cursor_x, self.cursor_y = HSTEP, VSTEP
+        self.weight: Literal["normal", "bold"] = "normal"
+        self.style: Literal["roman", "italic"] = "roman"
+        self.size = 16
+
+        for tok in tokens:
+            self.token(tok)
+
+    def token(self, tok):
         if isinstance(tok, Text):
             for word in tok.text.split():
                 font = tkinter.font.Font(
-                    size=16,
-                    weight=weight,
-                    slant=style,
+                    size=self.size,
+                    weight=self.weight,
+                    slant=self.style,
                 )
                 w = font.measure(word)
 
                 # カーソルが右端を超えたら改行
-                if cursor_x + w > WIDTH - HSTEP:
-                    cursor_y += font.metrics("linespace") * 1.25
-                    cursor_x = HSTEP
+                if self.cursor_x + w > WIDTH - HSTEP:
+                    self.cursor_y += font.metrics("linespace") * 1.25
+                    self.cursor_x = HSTEP
 
-                display_list.append((cursor_x, cursor_y, word, font))
-                cursor_x += w + font.measure(" ")
+                self.display_list.append(
+                    (self.cursor_x, self.cursor_y, word, font))
+                self.cursor_x += w + font.measure(" ")
 
         elif tok.tag == "i":
-            style = "italic"
+            self.style = "italic"
         elif tok.tag == "/i":
-            style = "roman"
+            self.style = "roman"
         elif tok.tag == "b":
-            weight = "bold"
+            self.weight = "bold"
         elif tok.tag == "/b":
-            weight = "normal"
+            self.weight = "normal"
         else:
             print("Unknown tag: {}".format(tok.tag))
-
-    return display_list
 
 
 SCROLL_STEP = 100
@@ -207,8 +213,8 @@ class Browser:
 
     def load(self, url):
         body = url.request()
-        text = lex(body)
-        self.display_list = layout(text)
+        tokens = lex(body)
+        self.display_list = Layout(tokens).display_list
         self.draw()
 
     def scrolldown(self, event):
