@@ -156,21 +156,7 @@ class Layout:
     def token(self, tok):
         if isinstance(tok, Text):
             for word in tok.text.split():
-                font = tkinter.font.Font(
-                    size=self.size,
-                    weight=self.weight,
-                    slant=self.style,
-                )
-                w = font.measure(word)
-
-                # カーソルが右端を超えたら改行
-                if self.cursor_x + w > WIDTH - HSTEP:
-                    self.cursor_y += font.metrics("linespace") * 1.25
-                    self.cursor_x = HSTEP
-
-                self.display_list.append(
-                    (self.cursor_x, self.cursor_y, word, font))
-                self.cursor_x += w + font.measure(" ")
+                self.word(word)
 
         elif tok.tag == "i":
             self.style = "italic"
@@ -190,6 +176,22 @@ class Layout:
             self.size -= 4
         else:
             print("Unknown tag: {}".format(tok.tag))
+
+    def word(self, word):
+        font = tkinter.font.Font(
+            size=self.size,
+            weight=self.weight,
+            slant=self.style,
+        )
+        w = font.measure(word)
+
+        # カーソルが右端を超えたら改行
+        if self.cursor_x + w > WIDTH - HSTEP:
+            self.cursor_y += font.metrics("linespace") * 1.25
+            self.cursor_x = HSTEP
+
+        self.display_list.append((self.cursor_x, self.cursor_y, word, font))
+        self.cursor_x += w + font.measure(" ")
 
 
 SCROLL_STEP = 100
