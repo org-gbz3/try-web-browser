@@ -55,6 +55,9 @@ class URL:
 
 def show_tk_window():
     root = tk.Tk()
+    import tkinter.font as tkfont
+    for name in sorted(tkfont.families()):
+        print(name)
     root.title("URL Tk Probe")
     root.geometry("520x220")
 

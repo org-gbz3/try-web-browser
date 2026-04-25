@@ -3,6 +3,7 @@ import html
 import socket
 import tkinter as tk
 import tkinter.font
+from typing import Literal
 from urllib.parse import unquote_to_bytes
 
 
@@ -104,40 +105,141 @@ class URL:
         return data_bytes.decode(charset, errors="replace")
 
 
+class Text:
+    def __init__(self, text):
+        self.text = text
+
+
+class Tag:
+    def __init__(self, tag):
+        self.tag = tag
+
+
 def lex(body):
-    text = ""
+    out = []
+    buffer = ""
     in_tag = False
     for c in body:
         if c == "<":
             in_tag = True
+            if buffer:
+                out.append(Text(html.unescape(buffer)))
+                buffer = ""
         elif c == ">":
             in_tag = False
-        elif not in_tag:
-            text += c
+            out.append(Tag(buffer))
+            buffer = ""
+        else:
+            buffer += c
 
-    return html.unescape(text)
+    if not in_tag and buffer:
+        out.append(Text(html.unescape(buffer)))
+
+    return out
+
+
+FONTS = {}
+
+
+def get_font(size, weight, slant):
+    # フォントキャッシュからフォントを取得
+    key = (size, weight, slant)
+    if key not in FONTS:
+        # フォントを作成
+        font = tkinter.font.Font(size=size, weight=weight, slant=slant)
+        # パフォーマンス向上のための Label オブジェクト（Tkinter の推奨）
+        label = tk.Label(font=font)
+        FONTS[key] = (font, label)
+
+    return FONTS[key][0]
 
 
 WIDTH, HEIGHT = 800, 600
 HSTEP, VSTEP = 13, 18
 
 
-def layout(text):
-    font = tkinter.font.Font()
-    display_list = []
-    cursor_x, cursor_y = HSTEP, VSTEP
-    for word in text.split():
+class Layout:
+    def __init__(self, tokens):
+        self.display_list = []
+        self.line = []
+        self.cursor_x, self.cursor_y = HSTEP, VSTEP
+        self.weight: Literal["normal", "bold"] = "normal"
+        self.style: Literal["roman", "italic"] = "roman"
+        self.size = 16
+
+        for tok in tokens:
+            self.token(tok)
+
+        # 最後に残った行をフラッシュ
+        self.flush()
+
+    def token(self, tok):
+        if isinstance(tok, Text):
+            for word in tok.text.split():
+                self.word(word)
+
+        elif tok.tag == "i":
+            self.style = "italic"
+        elif tok.tag == "/i":
+            self.style = "roman"
+        elif tok.tag == "b":
+            self.weight = "bold"
+        elif tok.tag == "/b":
+            self.weight = "normal"
+        elif tok.tag == "small":
+            self.size -= 2
+        elif tok.tag == "/small":
+            self.size += 2
+        elif tok.tag == "big":
+            self.size += 4
+        elif tok.tag == "/big":
+            self.size -= 4
+        elif tok.tag == "br":
+            self.flush()
+        elif tok.tag == "/p":
+            self.flush()
+            self.cursor_y += VSTEP
+        else:
+            print("Unknown tag: {}".format(tok.tag))
+
+    def word(self, word):
+        font = get_font(self.size, self.weight, self.style)
         w = font.measure(word)
 
+        # x座標、単語、フォントを現在の行に追加
+        self.line.append((self.cursor_x, word, font))
+
         # カーソルが右端を超えたら改行
-        if cursor_x + w > WIDTH - HSTEP:
-            cursor_y += font.metrics("linespace") * 1.25
-            cursor_x = HSTEP
+        if self.cursor_x + w > WIDTH - HSTEP:
+            self.flush()
 
-        display_list.append((cursor_x, cursor_y, word))
-        cursor_x += w + font.measure(" ")
+        self.cursor_x += w + font.measure(" ")
 
-    return display_list
+    def flush(self):
+        # 空行では何もしない
+        if not self.line:
+            return
+
+        # 行内の最大アセントを計算（レディングを考慮）
+        max_ascent = max(font.metrics("ascent") for _, _, font in self.line)
+
+        # ベースラインの y座標を計算
+        baseline = self.cursor_y + 1.25 * max_ascent
+
+        # 各単語をベースラインに合わせて配置
+        for x, word, font in self.line:
+            y = baseline - font.metrics("ascent")
+            self.display_list.append((x, y, word, font))
+
+        # 行内の最大ディセントを計算
+        max_descent = max(font.metrics("descent") for _, _, font in self.line)
+
+        # 次の行の y座標を更新（レディングを考慮）
+        self.cursor_y = baseline + 1.25 * max_descent
+
+        # xカーソルをリセットし、行バッファをクリア
+        self.cursor_x = HSTEP
+        self.line = []
 
 
 SCROLL_STEP = 100
@@ -159,17 +261,18 @@ class Browser:
 
     def draw(self):
         self.canvas.delete("all")
-        for x, y, c in self.display_list:
+        for x, y, word, font in self.display_list:
             if y > self.scroll + HEIGHT:
                 continue
             if y + VSTEP < self.scroll:
                 continue
-            self.canvas.create_text(x, y - self.scroll, text=c, anchor="nw")
+            self.canvas.create_text(
+                x, y - self.scroll, text=word, anchor="nw", font=font)
 
     def load(self, url):
         body = url.request()
-        text = lex(body)
-        self.display_list = layout(text)
+        tokens = lex(body)
+        self.display_list = Layout(tokens).display_list
         self.draw()
 
     def scrolldown(self, event):
