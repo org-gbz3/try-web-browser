@@ -138,6 +138,22 @@ def lex(body):
     return out
 
 
+FONTS = {}
+
+
+def get_font(size, weight, slant):
+    # フォントキャッシュからフォントを取得
+    key = (size, weight, slant)
+    if key not in FONTS:
+        # フォントを作成
+        font = tkinter.font.Font(size=size, weight=weight, slant=slant)
+        # パフォーマンス向上のための Label オブジェクト（Tkinter の推奨）
+        label = tk.Label(font=font)
+        FONTS[key] = (font, label)
+
+    return FONTS[key][0]
+
+
 WIDTH, HEIGHT = 800, 600
 HSTEP, VSTEP = 13, 18
 
@@ -187,11 +203,7 @@ class Layout:
             print("Unknown tag: {}".format(tok.tag))
 
     def word(self, word):
-        font = tkinter.font.Font(
-            size=self.size,
-            weight=self.weight,
-            slant=self.style,
-        )
+        font = get_font(self.size, self.weight, self.style)
         w = font.measure(word)
 
         # x座標、単語、フォントを現在の行に追加
