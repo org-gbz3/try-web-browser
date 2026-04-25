@@ -145,6 +145,7 @@ HSTEP, VSTEP = 13, 18
 class Layout:
     def __init__(self, tokens):
         self.display_list = []
+        self.line = []
         self.cursor_x, self.cursor_y = HSTEP, VSTEP
         self.weight: Literal["normal", "bold"] = "normal"
         self.style: Literal["roman", "italic"] = "roman"
@@ -152,6 +153,9 @@ class Layout:
 
         for tok in tokens:
             self.token(tok)
+
+        # 最後に残った行をフラッシュ
+        self.flush()
 
     def token(self, tok):
         if isinstance(tok, Text):
@@ -185,13 +189,40 @@ class Layout:
         )
         w = font.measure(word)
 
+        # x座標、単語、フォントを現在の行に追加
+        self.line.append((self.cursor_x, word, font))
+
         # カーソルが右端を超えたら改行
         if self.cursor_x + w > WIDTH - HSTEP:
-            self.cursor_y += font.metrics("linespace") * 1.25
-            self.cursor_x = HSTEP
+            self.flush()
 
-        self.display_list.append((self.cursor_x, self.cursor_y, word, font))
         self.cursor_x += w + font.measure(" ")
+
+    def flush(self):
+        # 空行では何もしない
+        if not self.line:
+            return
+
+        # 行内の最大アセントを計算（レディングを考慮）
+        max_ascent = max(font.metrics("ascent") for _, _, font in self.line)
+
+        # ベースラインの y座標を計算
+        baseline = self.cursor_y + 1.25 * max_ascent
+
+        # 各単語をベースラインに合わせて配置
+        for x, word, font in self.line:
+            y = baseline - font.metrics("ascent")
+            self.display_list.append((x, y, word, font))
+
+        # 行内の最大ディセントを計算
+        max_descent = max(font.metrics("descent") for _, _, font in self.line)
+
+        # 次の行の y座標を更新（レディングを考慮）
+        self.cursor_y = baseline + 1.25 * max_descent
+
+        # xカーソルをリセットし、行バッファをクリア
+        self.cursor_x = HSTEP
+        self.line = []
 
 
 SCROLL_STEP = 100
