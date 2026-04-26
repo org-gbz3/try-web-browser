@@ -139,6 +139,10 @@ class HTMLParser:
             "area", "base", "br", "col", "embed", "hr", "img", "input",
             "link", "meta", "param", "source", "track", "wbr"
         ]
+        self.HEAD_TAGS = [
+            "base", "basefont", "bgsound", "noscript",
+            "link", "meta", "title", "style", "script"
+        ]
 
     def parse(self):
         text = ""
@@ -163,15 +167,19 @@ class HTMLParser:
         # 空白のみのテキストノードは無視
         if text.isspace():
             return
+        # 暗黙のタグを挿入
+        self.implicit_tags(None)
         parent = self.unfinished[-1]
         node = Text(text, parent)
         parent.children.append(node)
 
     def add_tag(self, tag):
+        tag, attrs = self.get_attributes(tag)
         # DOCTYPE などの特殊なタグは無視
         if tag.startswith("!"):
             return
-        tag, attrs = self.get_attributes(tag)
+        # 暗黙のタグを挿入
+        self.implicit_tags(tag)
         if tag.startswith("/"):
             if len(self.unfinished) == 1:
                 return
@@ -188,6 +196,8 @@ class HTMLParser:
             self.unfinished.append(node)
 
     def finish(self):
+        if not self.unfinished:
+            self.implicit_tags(None)
         while len(self.unfinished) > 1:
             node = self.unfinished.pop()
             parent = self.unfinished[-1]
@@ -208,6 +218,29 @@ class HTMLParser:
             else:
                 attrs[attrpair.casefold()] = ""
         return tag, attrs
+
+    def implicit_tags(self, tag):
+        while True:
+            open_tags = [node.tag for node in self.unfinished]
+
+            # <html> が省略されている
+            if open_tags == [] and tag != "html":
+                self.add_tag("html")
+
+            # <head> または <body> が省略されている
+            elif open_tags == ["html"] and tag not in ["head", "body"]:
+                if tag in self.HEAD_TAGS:
+                    self.add_tag("head")
+                else:
+                    self.add_tag("body")
+
+            # </head> が省略されている
+            elif open_tags == ["html", "head"] and tag not in ["/head"] + self.HEAD_TAGS:
+                self.add_tag("/head")
+
+            # 未完成のタグは finish() で閉じるため、ここでは何もしない
+            else:
+                break
 
 
 FONTS = {}
