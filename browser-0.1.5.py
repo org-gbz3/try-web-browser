@@ -131,17 +131,18 @@ def print_tree(node, indent=0):
 
 
 class HTMLParser:
+    SELF_CLOSING_TAGS = [
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr"
+    ]
+    HEAD_TAGS = [
+        "base", "basefont", "bgsound", "noscript",
+        "link", "meta", "title", "style", "script"
+    ]
+
     def __init__(self, body):
         self.body = body
         self.unfinished = []
-        self.SELF_CLOSING_TAGS = [
-            "area", "base", "br", "col", "embed", "hr", "img", "input",
-            "link", "meta", "param", "source", "track", "wbr"
-        ]
-        self.HEAD_TAGS = [
-            "base", "basefont", "bgsound", "noscript",
-            "link", "meta", "title", "style", "script"
-        ]
 
     def parse(self):
         text = ""
@@ -161,6 +162,21 @@ class HTMLParser:
         if not in_tag and text:
             self.add_text(text)
         return self.finish()
+
+    def get_attributes(self, text):
+        parts = text.split()
+        tag = parts[0].casefold()
+        attrs = {}
+        for attrpair in parts[1:]:
+            if "=" in attrpair:
+                key, value = attrpair.split("=", 1)
+                # クォーテーションを削除
+                if len(value) > 2 and value[0] in ["'", "\""]:
+                    value = value[1:-1]
+                attrs[key.casefold()] = value
+            else:
+                attrs[attrpair.casefold()] = ""
+        return tag, attrs
 
     def add_text(self, text):
         # 空白のみのテキストノードは無視
@@ -194,30 +210,6 @@ class HTMLParser:
             node = Element(tag, attrs, parent)
             self.unfinished.append(node)
 
-    def finish(self):
-        if not self.unfinished:
-            self.implicit_tags(None)
-        while len(self.unfinished) > 1:
-            node = self.unfinished.pop()
-            parent = self.unfinished[-1]
-            parent.children.append(node)
-        return self.unfinished.pop()
-
-    def get_attributes(self, text):
-        parts = text.split()
-        tag = parts[0].casefold()
-        attrs = {}
-        for attrpair in parts[1:]:
-            if "=" in attrpair:
-                key, value = attrpair.split("=", 1)
-                # クォーテーションを削除
-                if len(value) > 2 and value[0] in ["'", "\""]:
-                    value = value[1:-1]
-                attrs[key.casefold()] = value
-            else:
-                attrs[attrpair.casefold()] = ""
-        return tag, attrs
-
     def implicit_tags(self, tag):
         while True:
             open_tags = [node.tag for node in self.unfinished]
@@ -240,6 +232,15 @@ class HTMLParser:
             # 未完成のタグは finish() で閉じるため、ここでは何もしない
             else:
                 break
+
+    def finish(self):
+        if not self.unfinished:
+            self.implicit_tags(None)
+        while len(self.unfinished) > 1:
+            node = self.unfinished.pop()
+            parent = self.unfinished[-1]
+            parent.children.append(node)
+        return self.unfinished.pop()
 
 
 FONTS = {}
@@ -275,12 +276,27 @@ class DocumentLayout:
         self.node = node
         self.parent = None
         self.children = []
+        self.x = None
+        self.y = None
+        self.width = None
+        self.height = None
 
     def layout(self):
         child = BlockLayout(self.node, self, None)
         self.children.append(child)
+
+        # 幅は親から子へトップダウンで計算
+        # 高さは子から親へボトムアップで計算
+        self.width = WIDTH - 2 * HSTEP
+        self.x = HSTEP
+        self.y = VSTEP
         child.layout()
-        self.display_list = child.display_list
+        self.height = child.height
+
+        # self.display_list = child.display_list
+
+    def paint(self):
+        return []
 
 
 class BlockLayout:
@@ -289,9 +305,30 @@ class BlockLayout:
         self.parent = parent
         self.previous = previous
         self.children = []
+        self.display_list = []
+        self.x = None
+        self.y = None
+        self.width = None
+        self.height = None
+
+    def layout_mode(self):
+        if isinstance(self.node, Text):
+            return "inline"
+        elif any([isinstance(child, Element) and child.tag in BLOCK_ELEMENTS for child in self.node.children]):
+            return "block"
+        elif self.node.children:
+            return "inline"
+        else:
+            return "block"
 
     def layout(self):
-        self.display_list = []
+        self.x = self.parent.x
+        self.width = self.parent.width
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+
         mode = self.layout_mode()
         if mode == "block":
             previous = None
@@ -312,6 +349,11 @@ class BlockLayout:
 
         for child in self.children:
             child.layout()
+
+        if mode == "block":
+            self.height = sum(child.height for child in self.children)
+        else:
+            self.height = self.cursor_y
 
     def recurse(self, tree):
         if isinstance(tree, Text):
@@ -348,19 +390,6 @@ class BlockLayout:
             self.flush()
             self.cursor_y += VSTEP
 
-    def word(self, word):
-        font = get_font(self.size, self.weight, self.style)
-        w = font.measure(word)
-
-        # x座標、単語、フォントを現在の行に追加
-        self.line.append((self.cursor_x, word, font))
-
-        # カーソルが右端を超えたら改行
-        if self.cursor_x + w > WIDTH - HSTEP:
-            self.flush()
-
-        self.cursor_x += w + font.measure(" ")
-
     def flush(self):
         # 空行では何もしない
         if not self.line:
@@ -373,8 +402,9 @@ class BlockLayout:
         baseline = self.cursor_y + 1.25 * max_ascent
 
         # 各単語をベースラインに合わせて配置
-        for x, word, font in self.line:
-            y = baseline - font.metrics("ascent")
+        for rel_x, word, font in self.line:
+            x = self.x + rel_x
+            y = self.y + baseline - font.metrics("ascent")
             self.display_list.append((x, y, word, font))
 
         # 行内の最大ディセントを計算
@@ -384,18 +414,30 @@ class BlockLayout:
         self.cursor_y = baseline + 1.25 * max_descent
 
         # xカーソルをリセットし、行バッファをクリア
-        self.cursor_x = HSTEP
+        self.cursor_x = 0
         self.line = []
 
-    def layout_mode(self):
-        if isinstance(self.node, Text):
-            return "inline"
-        elif any([isinstance(child, Element) and child.tag in BLOCK_ELEMENTS for child in self.node.children]):
-            return "block"
-        elif self.node.children:
-            return "inline"
-        else:
-            return "block"
+    def word(self, word):
+        font = get_font(self.size, self.weight, self.style)
+        w = font.measure(word)
+
+        # x座標、単語、フォントを現在の行に追加
+        self.line.append((self.cursor_x, word, font))
+
+        # カーソルが右端を超えたら改行
+        if self.cursor_x + w > self.width:
+            self.flush()
+
+        self.cursor_x += w + font.measure(" ")
+
+    def paint(self):
+        return self.display_list
+
+
+def paint_tree(layout_object, display_list):
+    display_list.extend(layout_object.paint())
+    for child in layout_object.children:
+        paint_tree(child, display_list)
 
 
 SCROLL_STEP = 100
@@ -430,8 +472,9 @@ class Browser:
         self.nodes = HTMLParser(body).parse()
         self.document = DocumentLayout(self.nodes)
         self.document.layout()
-        self.display_list = self.document.display_list
-        print_tree(self.document.node)
+        self.display_list = []
+        paint_tree(self.document, self.display_list)
+        # print_tree(self.document.node)
         self.draw()
 
     def scrolldown(self, event):
