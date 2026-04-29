@@ -308,7 +308,7 @@ class CSSParser:
 
     def body(self):
         pairs = {}
-        while self.i < len(self.s):
+        while self.i < len(self.s) and self.s[self.i] != "}":
             try:
                 prop, val = self.pair()
                 pairs[prop.casefold()] = val
@@ -316,7 +316,7 @@ class CSSParser:
                 self.literal(";")
                 self.whitespace()
             except Exception:
-                why = self.ignore_until([";"])
+                why = self.ignore_until([";", "}"])
                 if why == ";":
                     self.literal(";")
                     self.whitespace()
@@ -324,9 +324,57 @@ class CSSParser:
                     break
         return pairs
 
+    def selector(self):
+        out = Tagselector(self.word().casefold())
+        self.whitespace()
+        while self.i < len(self.s) and self.s[self.i] != "{":
+            tag = self.word()
+            descendant = Tagselector(tag.casefold())
+            out = DescendantSelector(out, descendant)
+            self.whitespace()
+        return out
+
     def parse(self):
-        # 今回は CSS をサポートしないので、空のスタイルシートを返す
-        return {}
+        rules = []
+        while self.i < len(self.s):
+            try:
+                self.whitespace()
+                selector = self.selector()
+                self.literal("{")
+                body = self.body()
+                self.literal("}")
+                rules.append((selector, body))
+            except Exception:
+                why = self.ignore_until(["}"])
+                if why == "}":
+                    self.literal("}")
+                    self.whitespace()
+                else:
+                    break
+        return rules
+
+
+class Tagselector:
+    def __init__(self, tag):
+        self.tag = tag
+
+    def matches(self, node):
+        return isinstance(node, Element) and node.tag == self.tag
+
+
+class DescendantSelector:
+    def __init__(self, anncestor, descendant):
+        self.anncestor = anncestor  # 先祖
+        self.descendant = descendant  # 子孫
+
+    def matches(self, node):
+        if not self.descendant.matches(node):
+            return False
+        while node.parent:
+            if self.anncestor.matches(node.parent):
+                return True
+            node = node.parent
+        return False
 
 
 FONTS = {}
