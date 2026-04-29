@@ -125,6 +125,7 @@ class Text:
         self.text = text
         self.children = []
         self.parent = parent
+        self.style = {}
 
     def __repr__(self) -> str:
         return repr(self.text)
@@ -136,6 +137,7 @@ class Element:
         self.attributes = attributes
         self.children = []
         self.parent = parent
+        self.style = {}
 
     def __repr__(self) -> str:
         return "<{}>".format(self.tag)
@@ -260,6 +262,73 @@ class HTMLParser:
         return self.unfinished.pop()
 
 
+class CSSParser:
+    def __init__(self, s):
+        self.s = s
+        self.i = 0
+
+    def whitespace(self):
+        while self.i < len(self.s) and self.s[self.i].isspace():
+            self.i += 1
+
+    def word(self):
+        start = self.i
+        while self.i < len(self.s):
+            # プロパティ名として許容される文字が続く間、i を進める
+            if self.s[self.i].isalnum() or self.s[self.i] in "#-.%":
+                self.i += 1
+            else:
+                break
+        if not (self.i > start):
+            raise Exception(
+                "Parsing error: expected word at position {}".format(self.i))
+        return self.s[start:self.i]
+
+    def literal(self, literal):
+        if not (self.i < len(self.s) and self.s[self.i] == literal):
+            raise Exception(
+                "Parsing error: expected '{}' at position {}".format(literal, self.i))
+        self.i += 1
+
+    def pair(self):
+        prop = self.word()
+        self.whitespace()
+        self.literal(":")
+        self.whitespace()
+        value = self.word()
+        return prop.casefold(), value
+
+    def ignore_until(self, chars):
+        while self.i < len(self.s):
+            if self.s[self.i] in chars:
+                return self.s[self.i]
+            else:
+                self.i += 1
+        return None
+
+    def body(self):
+        pairs = {}
+        while self.i < len(self.s):
+            try:
+                prop, val = self.pair()
+                pairs[prop.casefold()] = val
+                self.whitespace()
+                self.literal(";")
+                self.whitespace()
+            except Exception:
+                why = self.ignore_until([";"])
+                if why == ";":
+                    self.literal(";")
+                    self.whitespace()
+                else:
+                    break
+        return pairs
+
+    def parse(self):
+        # 今回は CSS をサポートしないので、空のスタイルシートを返す
+        return {}
+
+
 FONTS = {}
 
 
@@ -274,6 +343,15 @@ def get_font(size, weight, slant):
         FONTS[key] = (font, label)
 
     return FONTS[key][0]
+
+
+def style(node):
+    if isinstance(node, Element) and "style" in node.attributes:
+        pairs = CSSParser(node.attributes["style"]).body()
+        for prop, val in pairs.items():
+            node.style[prop] = val
+    for child in node.children:
+        style(child)
 
 
 WIDTH, HEIGHT = 800, 600
@@ -449,9 +527,11 @@ class BlockLayout:
 
     def paint(self):
         cmds = []
-        if isinstance(self.node, Element) and self.node.tag == "pre":
+        bgcolor = self.node.style.get("background-color", "transparent")
+#        if isinstance(self.node, Element) and self.node.tag == "pre":
+        if bgcolor != "transparent":
             x2, y2 = self.x + self.width, self.y + self.height
-            rect = DrawRect(self.x, self.y, x2, y2, "gray")
+            rect = DrawRect(self.x, self.y, x2, y2, bgcolor)  # "gray")
             cmds.append(rect)
         if self.layout_mode() == "inline":
             for x, y, word, font in self.display_list:
@@ -524,6 +604,9 @@ class Browser:
 
         self.nodes = HTMLParser(body).parse()
         logging.info("Parsed HTML: %s", repr(self.nodes))
+
+        style(self.nodes)
+        logging.info("Styled document")
 
         self.document = DocumentLayout(self.nodes)
         self.document.layout()
