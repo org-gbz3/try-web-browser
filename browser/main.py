@@ -119,6 +119,28 @@ class URL:
 
         return data_bytes.decode(charset, errors="replace")
 
+    def resolve(self, url):
+        # 通常のURL
+        if "://" in url:
+            return URL(url)
+        # パス相対URL
+        if not url.startswith("/"):
+            dir, _ = self.path.rsplit("/", 1)
+            while url.startswith("../"):
+                _, url = url.split("/", 1)
+                if "/" in dir:
+                    dir, _ = dir.rsplit("/", 1)
+            url = dir + "/" + url
+        # スキーム相対URL
+        if url.startswith("//"):
+            return URL("{}:{}".format(self.scheme, url))
+        # ホスト相対URL
+        else:
+            return URL("{}://{}:{}{}".format(self.scheme, self.host, self.port, url))
+
+    def __repr__(self) -> str:
+        return "<URL {}://{}:{}{}>".format(self.scheme, self.host, self.port, self.path)
+
 
 class Text:
     def __init__(self, text, parent):
@@ -147,6 +169,13 @@ def print_tree(node, indent=0):
     print(" " * indent + repr(node))
     for child in node.children:
         print_tree(child, indent + 2)
+
+
+def tree_to_list(tree, list):
+    list.append(tree)
+    for child in tree.children:
+        tree_to_list(child, list)
+    return list
 
 
 class HTMLParser:
@@ -393,13 +422,18 @@ def get_font(size, weight, slant):
     return FONTS[key][0]
 
 
-def style(node):
+def style(node, rules):
+    for selector, body in rules:
+        if not selector.matches(node):
+            continue
+        for prop, val in body.items():
+            node.style[prop] = val
     if isinstance(node, Element) and "style" in node.attributes:
         pairs = CSSParser(node.attributes["style"]).body()
         for prop, val in pairs.items():
             node.style[prop] = val
     for child in node.children:
-        style(child)
+        style(child, rules)
 
 
 WIDTH, HEIGHT = 800, 600
@@ -620,6 +654,7 @@ def paint_tree(layout_object, display_list):
 
 
 SCROLL_STEP = 100
+DEFAULT_STYLE_SHEET = CSSParser(open("browser/browser.css").read()).parse()
 
 
 class Browser:
@@ -653,7 +688,23 @@ class Browser:
         self.nodes = HTMLParser(body).parse()
         logging.info("Parsed HTML: %s", repr(self.nodes))
 
-        style(self.nodes)
+        rules = DEFAULT_STYLE_SHEET.copy()
+        links = [node.attributes["href"]
+                 for node in tree_to_list(self.nodes, [])
+                 if isinstance(node, Element) and node.tag == "link"
+                 and node.attributes.get("rel") == "stylesheet" and "href" in node.attributes]
+        for link in links:
+            style_url = url.resolve(link)
+            try:
+                body = style_url.request()
+            except Exception:
+                logging.warning("Failed to load stylesheet: %s",
+                                style_url.data_url if style_url.scheme == "data" else str(style_url))
+                continue
+            rules.extend(CSSParser(body).parse())
+            logging.info("Loaded stylesheet: %s",
+                         style_url.data_url if style_url.scheme == "data" else str(style_url))
+        style(self.nodes, rules)
         logging.info("Styled document")
 
         self.document = DocumentLayout(self.nodes)
