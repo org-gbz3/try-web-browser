@@ -383,11 +383,6 @@ class CSSParser:
         return rules
 
 
-def cascade_priority(rule):
-    selector, _ = rule
-    return selector.priority
-
-
 class Tagselector:
     def __init__(self, tag):
         self.tag = tag
@@ -429,18 +424,54 @@ def get_font(size, weight, slant):
     return FONTS[key][0]
 
 
+DEFAULT_STYLE_SHEET = CSSParser(open("browser/browser.css").read()).parse()
+INHERITED_PROPERTIES = {
+    "font-size": "16px",
+    "font-style": "normal",
+    "font-weight": "normal",
+    "color": "black",
+}
+
+
 def style(node, rules):
+    # デフォルトスタイルを適用
+    for prop, default_val in INHERITED_PROPERTIES.items():
+        if node.parent:
+            node.style[prop] = node.parent.style[prop]
+        else:
+            node.style[prop] = default_val
+
+    # CSSルールを適用
     for selector, body in rules:
         if not selector.matches(node):
             continue
         for prop, val in body.items():
             node.style[prop] = val
+
+    # インラインスタイルを適用
     if isinstance(node, Element) and "style" in node.attributes:
         pairs = CSSParser(node.attributes["style"]).body()
         for prop, val in pairs.items():
             node.style[prop] = val
+
+    # フォントサイズは計算済みスタイル（computed style）で扱う
+    if node.style["font-size"].endswith("%"):
+        if node.parent:
+            parent_font_size = node.parent.style["font-size"]
+        else:
+            parent_font_size = INHERITED_PROPERTIES["font-size"]
+        node_pct = float(node.style["font-size"][:-1]) / 100
+        parent_px = float(parent_font_size[:-2])
+        node.style["font-size"] = "{}px".format(int(node_pct * parent_px))
+
+    # 子ノードにスタイルを適用
     for child in node.children:
         style(child, rules)
+
+
+def cascade_priority(rule):
+    selector, _ = rule
+    return selector.priority
 
 
 WIDTH, HEIGHT = 800, 600
@@ -661,7 +692,6 @@ def paint_tree(layout_object, display_list):
 
 
 SCROLL_STEP = 100
-DEFAULT_STYLE_SHEET = CSSParser(open("browser/browser.css").read()).parse()
 
 
 class Browser:
