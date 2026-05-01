@@ -383,9 +383,15 @@ class CSSParser:
         return rules
 
 
+def cascade_priority(rule):
+    selector, _ = rule
+    return selector.priority
+
+
 class Tagselector:
     def __init__(self, tag):
         self.tag = tag
+        self.priority = 1
 
     def matches(self, node):
         return isinstance(node, Element) and node.tag == self.tag
@@ -395,6 +401,7 @@ class DescendantSelector:
     def __init__(self, anncestor, descendant):
         self.anncestor = anncestor  # 先祖
         self.descendant = descendant  # 子孫
+        self.priority = self.anncestor.priority + self.descendant.priority
 
     def matches(self, node):
         if not self.descendant.matches(node):
@@ -704,7 +711,7 @@ class Browser:
             rules.extend(CSSParser(body).parse())
             logging.info("Loaded stylesheet: %s",
                          style_url.data_url if style_url.scheme == "data" else str(style_url))
-        style(self.nodes, rules)
+        style(self.nodes, sorted(rules, key=cascade_priority))
         logging.info("Styled document")
 
         self.document = DocumentLayout(self.nodes)
