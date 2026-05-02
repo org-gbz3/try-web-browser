@@ -119,12 +119,35 @@ class URL:
 
         return data_bytes.decode(charset, errors="replace")
 
+    def resolve(self, url):
+        # 通常のURL
+        if "://" in url:
+            return URL(url)
+        # パス相対URL
+        if not url.startswith("/"):
+            dir, _ = self.path.rsplit("/", 1)
+            while url.startswith("../"):
+                _, url = url.split("/", 1)
+                if "/" in dir:
+                    dir, _ = dir.rsplit("/", 1)
+            url = dir + "/" + url
+        # スキーム相対URL
+        if url.startswith("//"):
+            return URL("{}:{}".format(self.scheme, url))
+        # ホスト相対URL
+        else:
+            return URL("{}://{}:{}{}".format(self.scheme, self.host, self.port, url))
+
+    def __repr__(self) -> str:
+        return "<URL {}://{}:{}{}>".format(self.scheme, self.host, self.port, self.path)
+
 
 class Text:
     def __init__(self, text, parent):
         self.text = text
         self.children = []
         self.parent = parent
+        self.style = {}
 
     def __repr__(self) -> str:
         return repr(self.text)
@@ -136,6 +159,7 @@ class Element:
         self.attributes = attributes
         self.children = []
         self.parent = parent
+        self.style = {}
 
     def __repr__(self) -> str:
         return "<{}>".format(self.tag)
@@ -145,6 +169,13 @@ def print_tree(node, indent=0):
     print(" " * indent + repr(node))
     for child in node.children:
         print_tree(child, indent + 2)
+
+
+def tree_to_list(tree, list):
+    list.append(tree)
+    for child in tree.children:
+        tree_to_list(child, list)
+    return list
 
 
 class HTMLParser:
@@ -169,7 +200,7 @@ class HTMLParser:
                 in_tag = True
                 if text:
                     self.add_text(text)
-                    text = ""
+                text = ""
             elif c == ">":
                 in_tag = False
                 self.add_tag(text)
@@ -236,7 +267,7 @@ class HTMLParser:
                 self.add_tag("html")
 
             # <head> または <body> が省略されている
-            elif open_tags == ["html"] and tag not in ["head", "body"]:
+            elif open_tags == ["html"] and tag not in ["head", "body", "/html"]:
                 if tag in self.HEAD_TAGS:
                     self.add_tag("head")
                 else:
@@ -260,6 +291,123 @@ class HTMLParser:
         return self.unfinished.pop()
 
 
+class CSSParser:
+    def __init__(self, s):
+        self.s = s
+        self.i = 0
+
+    def whitespace(self):
+        while self.i < len(self.s) and self.s[self.i].isspace():
+            self.i += 1
+
+    def word(self):
+        start = self.i
+        while self.i < len(self.s):
+            # プロパティ名として許容される文字が続く間、i を進める
+            if self.s[self.i].isalnum() or self.s[self.i] in "#-.%":
+                self.i += 1
+            else:
+                break
+        if not (self.i > start):
+            raise Exception(
+                "Parsing error: expected word at position {}".format(self.i))
+        return self.s[start:self.i]
+
+    def literal(self, literal):
+        if not (self.i < len(self.s) and self.s[self.i] == literal):
+            raise Exception(
+                "Parsing error: expected '{}' at position {}".format(literal, self.i))
+        self.i += 1
+
+    def pair(self):
+        prop = self.word()
+        self.whitespace()
+        self.literal(":")
+        self.whitespace()
+        value = self.word()
+        return prop.casefold(), value
+
+    def ignore_until(self, chars):
+        while self.i < len(self.s):
+            if self.s[self.i] in chars:
+                return self.s[self.i]
+            else:
+                self.i += 1
+        return None
+
+    def body(self):
+        pairs = {}
+        while self.i < len(self.s) and self.s[self.i] != "}":
+            try:
+                prop, val = self.pair()
+                pairs[prop.casefold()] = val
+                self.whitespace()
+                self.literal(";")
+                self.whitespace()
+            except Exception:
+                why = self.ignore_until([";", "}"])
+                if why == ";":
+                    self.literal(";")
+                    self.whitespace()
+                else:
+                    break
+        return pairs
+
+    def selector(self):
+        out = Tagselector(self.word().casefold())
+        self.whitespace()
+        while self.i < len(self.s) and self.s[self.i] != "{":
+            tag = self.word()
+            descendant = Tagselector(tag.casefold())
+            out = DescendantSelector(out, descendant)
+            self.whitespace()
+        return out
+
+    def parse(self):
+        rules = []
+        while self.i < len(self.s):
+            try:
+                self.whitespace()
+                selector = self.selector()
+                self.literal("{")
+                body = self.body()
+                self.literal("}")
+                rules.append((selector, body))
+            except Exception:
+                why = self.ignore_until(["}"])
+                if why == "}":
+                    self.literal("}")
+                    self.whitespace()
+                else:
+                    break
+        return rules
+
+
+class Tagselector:
+    def __init__(self, tag):
+        self.tag = tag
+        self.priority = 1
+
+    def matches(self, node):
+        return isinstance(node, Element) and node.tag == self.tag
+
+
+class DescendantSelector:
+    def __init__(self, anncestor, descendant):
+        self.anncestor = anncestor  # 先祖
+        self.descendant = descendant  # 子孫
+        self.priority = self.anncestor.priority + self.descendant.priority
+
+    def matches(self, node):
+        if not self.descendant.matches(node):
+            return False
+        while node.parent:
+            if self.anncestor.matches(node.parent):
+                return True
+            node = node.parent
+        return False
+
+
 FONTS = {}
 
 
@@ -274,6 +422,56 @@ def get_font(size, weight, slant):
         FONTS[key] = (font, label)
 
     return FONTS[key][0]
+
+
+DEFAULT_STYLE_SHEET = CSSParser(open("browser/browser.css").read()).parse()
+INHERITED_PROPERTIES = {
+    "font-size": "16px",
+    "font-style": "normal",
+    "font-weight": "normal",
+    "color": "black",
+}
+
+
+def style(node, rules):
+    # デフォルトスタイルを適用
+    for prop, default_val in INHERITED_PROPERTIES.items():
+        if node.parent:
+            node.style[prop] = node.parent.style[prop]
+        else:
+            node.style[prop] = default_val
+
+    # CSSルールを適用
+    for selector, body in rules:
+        if not selector.matches(node):
+            continue
+        for prop, val in body.items():
+            node.style[prop] = val
+
+    # インラインスタイルを適用
+    if isinstance(node, Element) and "style" in node.attributes:
+        pairs = CSSParser(node.attributes["style"]).body()
+        for prop, val in pairs.items():
+            node.style[prop] = val
+
+    # フォントサイズは計算済みスタイル（computed style）で扱う
+    if node.style["font-size"].endswith("%"):
+        if node.parent:
+            parent_font_size = node.parent.style["font-size"]
+        else:
+            parent_font_size = INHERITED_PROPERTIES["font-size"]
+        node_pct = float(node.style["font-size"][:-1]) / 100
+        parent_px = float(parent_font_size[:-2])
+        node.style["font-size"] = "{}px".format(int(node_pct * parent_px))
+
+    # 子ノードにスタイルを適用
+    for child in node.children:
+        style(child, rules)
+
+
+def cascade_priority(rule):
+    selector, _ = rule
+    return selector.priority
 
 
 WIDTH, HEIGHT = 800, 600
@@ -322,7 +520,8 @@ class BlockLayout:
         self.parent = parent
         self.previous = previous
         self.children = []
-        self.display_list = []
+        self.display_list: list[tuple[int, float,
+                                      str, tkinter.font.Font, str]] = []
         self.x: int = 0
         self.y: int = 0
         self.width: int = 0
@@ -356,9 +555,6 @@ class BlockLayout:
         else:
             self.cursor_x = 0
             self.cursor_y = 0
-            self.weight = "normal"
-            self.style = "roman"
-            self.size = 12
 
             self.line = []
             self.recurse(self.node)
@@ -368,44 +564,20 @@ class BlockLayout:
             child.layout()
 
         if mode == "block":
-            self.height = sum(child.height for child in self.children)
+            self.height = sum([child.height for child in self.children])
         else:
             self.height = self.cursor_y
 
-    def recurse(self, tree):
-        if isinstance(tree, Text):
-            for word in tree.text.split():
-                self.word(word)
+    def recurse(self, node):
+        if isinstance(node, Text):
+            for word in node.text.split():
+                self.word(node, word)
         else:
-            self.open_tag(tree.tag)
-            for child in tree.children:
+            if node.tag == "br":
+                self.flush()
+            for child in node.children:
                 self.recurse(child)
-            self.close_tag(tree.tag)
-
-    def open_tag(self, tag):
-        if tag == "i":
-            self.style = "italic"
-        elif tag == "b":
-            self.weight = "bold"
-        elif tag == "small":
-            self.size -= 2
-        elif tag == "big":
-            self.size += 4
-        elif tag == "br":
-            self.flush()
-
-    def close_tag(self, tag):
-        if tag == "i":
-            self.style = "roman"
-        elif tag == "b":
-            self.weight = "normal"
-        elif tag == "small":
-            self.size += 2
-        elif tag == "big":
-            self.size -= 4
-        elif tag == "p":
-            self.flush()
-            self.cursor_y += VSTEP
+        return self.display_list
 
     def flush(self):
         # 空行では何もしない
@@ -413,19 +585,21 @@ class BlockLayout:
             return
 
         # 行内の最大アセントを計算（レディングを考慮）
-        max_ascent = max(font.metrics("ascent") for _, _, font in self.line)
+        max_ascent = max([font.metrics("ascent")
+                         for _, _, font, _ in self.line])
 
         # ベースラインの y座標を計算
         baseline = self.cursor_y + 1.25 * max_ascent
 
         # 各単語をベースラインに合わせて配置
-        for rel_x, word, font in self.line:
+        for rel_x, word, font, color in self.line:
             x = self.x + rel_x
             y = self.y + baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font))
+            self.display_list.append((x, y, word, font, color))
 
         # 行内の最大ディセントを計算
-        max_descent = max(font.metrics("descent") for _, _, font in self.line)
+        max_descent = max([font.metrics("descent")
+                          for _, _, font, _ in self.line])
 
         # 次の行の y座標を更新（レディングを考慮）
         self.cursor_y = baseline + 1.25 * max_descent
@@ -434,17 +608,26 @@ class BlockLayout:
         self.cursor_x = 0
         self.line = []
 
-    def word(self, word):
-        font = get_font(self.size, self.weight, self.style)
-        w = font.measure(word)
+    def word(self, node, word):
+        color = node.style["color"]
+        weight = node.style["font-weight"]
+        style = node.style["font-style"]
+        if style == "normal":
+            style = "roman"
+        # レディングを考慮してフォントサイズを縮小
+        size = int(float(node.style["font-size"][:-2]) * .75)
 
-        # x座標、単語、フォントを現在の行に追加
-        self.line.append((self.cursor_x, word, font))
+        font = get_font(size, weight, style)
+        w = font.measure(word)
 
         # カーソルが右端を超えたら改行
         if self.cursor_x + w > self.width:
             self.flush()
 
+        # x座標、単語、フォント、カラーを現在の行に追加
+        self.line.append((self.cursor_x, word, font, color))
+
+        # カーソルを単語の幅だけ右に移動（スペース分も考慮）
         self.cursor_x += w + font.measure(" ")
 
     def paint(self):
@@ -453,23 +636,35 @@ class BlockLayout:
             x2, y2 = self.x + self.width, self.y + self.height
             rect = DrawRect(self.x, self.y, x2, y2, "gray")
             cmds.append(rect)
+        bgcolor = self.node.style.get("background-color", "transparent")
+        if bgcolor != "transparent":
+            x2, y2 = self.x + self.width, self.y + self.height
+            rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
+            cmds.append(rect)
         if self.layout_mode() == "inline":
-            for x, y, word, font in self.display_list:
-                cmds.append(DrawText(x, y, word, font))
+            for x, y, word, font, color in self.display_list:
+                cmds.append(
+                    DrawText(x, y, word, font, color))
         return cmds
 
 
 class DrawText:
-    def __init__(self, x1, y1, text, font):
+    def __init__(self, x1, y1, text, font, color):
         self.top = y1
         self.left = x1
         self.text = text
         self.font = font
         self.bottom = y1 + font.metrics("linespace")
+        self.color = color
 
     def execute(self, scroll, canvas):
         canvas.create_text(
-            self.left, self.top - scroll, text=self.text, anchor="nw", font=self.font)
+            self.left,
+            self.top - scroll,
+            text=self.text,
+            font=self.font,
+            anchor="nw",
+            fill=self.color)
 
 
 class DrawRect:
@@ -501,6 +696,7 @@ class Browser:
             self.window,
             width=WIDTH,
             height=HEIGHT,
+            bg="white",
         )
         self.canvas.pack()
         self.scroll = 0
@@ -525,7 +721,27 @@ class Browser:
         self.nodes = HTMLParser(body).parse()
         logging.info("Parsed HTML: %s", repr(self.nodes))
 
+        rules = DEFAULT_STYLE_SHEET.copy()
+        links = [node.attributes["href"]
+                 for node in tree_to_list(self.nodes, [])
+                 if isinstance(node, Element) and node.tag == "link"
+                 and node.attributes.get("rel") == "stylesheet" and "href" in node.attributes]
+        for link in links:
+            style_url = url.resolve(link)
+            try:
+                body = style_url.request()
+            except Exception:
+                logging.warning("Failed to load stylesheet: %s",
+                                style_url.data_url if style_url.scheme == "data" else str(style_url))
+                continue
+            rules.extend(CSSParser(body).parse())
+            logging.info("Loaded stylesheet: %s",
+                         style_url.data_url if style_url.scheme == "data" else str(style_url))
+        style(self.nodes, sorted(rules, key=cascade_priority))
+        logging.info("Styled document")
+
         self.document = DocumentLayout(self.nodes)
+        # print_tree(self.document.node)
         self.document.layout()
         logging.info("Laid out document: width=%d, height=%d",
                      self.document.width, self.document.height)
@@ -534,7 +750,6 @@ class Browser:
         paint_tree(self.document, self.display_list)
         logging.info("Painted document: %d items in display list",
                      len(self.display_list))
-        # print_tree(self.document.node)
 
         self.draw()
         logging.info("Finished drawing document")
