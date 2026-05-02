@@ -632,10 +632,6 @@ class BlockLayout:
 
     def paint(self):
         cmds = []
-        if self.layout_mode() == "inline":
-            for x, y, word, font, color in self.display_list:
-                cmds.append(
-                    DrawText(self.x + x, self.y + y, word, font, color))
         if isinstance(self.node, Element) and self.node.tag == "pre":
             x2, y2 = self.x + self.width, self.y + self.height
             rect = DrawRect(self.x, self.y, x2, y2, "gray")
@@ -645,6 +641,10 @@ class BlockLayout:
             x2, y2 = self.x + self.width, self.y + self.height
             rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
             cmds.append(rect)
+        if self.layout_mode() == "inline":
+            for x, y, word, font, color in self.display_list:
+                cmds.append(
+                    DrawText(x, y, word, font, color))
         return cmds
 
 
