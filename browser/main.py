@@ -508,8 +508,6 @@ class DocumentLayout:
         child.layout()
         self.height = child.height
 
-        # self.display_list = child.display_list
-
     def paint(self):
         return []
 
@@ -520,8 +518,6 @@ class BlockLayout:
         self.parent = parent
         self.previous = previous
         self.children = []
-        self.display_list: list[tuple[int, float,
-                                      str, tkinter.font.Font, str]] = []
         self.x: int = 0
         self.y: int = 0
         self.width: int = 0
@@ -553,31 +549,21 @@ class BlockLayout:
                 self.children.append(next)
                 previous = next
         else:
-            self.cursor_x = 0
-            self.cursor_y = 0
-
-            self.line = []
+            self.new_line()
             self.recurse(self.node)
-            self.flush()
 
         for child in self.children:
             child.layout()
 
-        if mode == "block":
-            self.height = sum([child.height for child in self.children])
-        else:
-            self.height = self.cursor_y
+        self.height = sum([child.height for child in self.children])
 
     def recurse(self, node):
         if isinstance(node, Text):
             for word in node.text.split():
                 self.word(node, word)
         else:
-            if node.tag == "br":
-                self.flush()
             for child in node.children:
                 self.recurse(child)
-        return self.display_list
 
     def flush(self):
         # 空行では何もしない
@@ -591,12 +577,6 @@ class BlockLayout:
         # ベースラインの y座標を計算
         baseline = self.cursor_y + 1.25 * max_ascent
 
-        # 各単語をベースラインに合わせて配置
-        for rel_x, word, font, color in self.line:
-            x = self.x + rel_x
-            y = self.y + baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font, color))
-
         # 行内の最大ディセントを計算
         max_descent = max([font.metrics("descent")
                           for _, _, font, _ in self.line])
@@ -609,7 +589,6 @@ class BlockLayout:
         self.line = []
 
     def word(self, node, word):
-        color = node.style["color"]
         weight = node.style["font-weight"]
         style = node.style["font-style"]
         if style == "normal":
@@ -622,13 +601,22 @@ class BlockLayout:
 
         # カーソルが右端を超えたら改行
         if self.cursor_x + w > self.width:
-            self.flush()
+            self.new_line()
 
-        # x座標、単語、フォント、カラーを現在の行に追加
-        self.line.append((self.cursor_x, word, font, color))
+        # 行に単語を追加
+        line = self.children[-1]
+        previous_word = line.children[-1] if line.children else None
+        text = TextLayout(node, word, line, previous_word)
+        line.children.append(text)
 
         # カーソルを単語の幅だけ右に移動（スペース分も考慮）
         self.cursor_x += w + font.measure(" ")
+
+    def new_line(self):
+        self.cursor_x = 0
+        last_line = self.children[-1] if self.children else None
+        new_line = LineLayout(self.node, self, last_line)
+        self.children.append(new_line)
 
     def paint(self):
         cmds = []
@@ -641,11 +629,79 @@ class BlockLayout:
             x2, y2 = self.x + self.width, self.y + self.height
             rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
             cmds.append(rect)
-        if self.layout_mode() == "inline":
-            for x, y, word, font, color in self.display_list:
-                cmds.append(
-                    DrawText(x, y, word, font, color))
         return cmds
+
+
+class LineLayout:
+    def __init__(self, node, parent, previous):
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+        self.children = []
+
+    def layout(self):
+        self.width = self.parent.width
+        self.x = self.parent.x
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+
+        for word in self.children:
+            word.layout()
+
+        # 行内の最大アセントを計算（レディングを考慮）
+        max_ascent = max([word.font.metrics("ascent")
+                         for word in self.children])
+
+        # ベースラインの y座標を計算
+        baseline = self.y + 1.25 * max_ascent
+
+        # 各単語をベースラインに合わせて配置
+        for word in self.children:
+            word.y = baseline - word.font.metrics("ascent")
+
+        # 行内の最大ディセントを計算
+        max_descent = max([word.font.metrics("descent")
+                          for word in self.children])
+
+        # 行の高さを更新（レディングを考慮）
+        self.height = 1.25 * (max_ascent + max_descent)
+
+    def paint(self):
+        return []
+
+
+class TextLayout:
+    def __init__(self, node, word, parent, previous):
+        self.node = node
+        self.word = word
+        self.parent = parent
+        self.previous = previous
+        self.children = []
+        self.y = 0  # LineLayout.layout() で配置されるまでの仮の値
+
+    def layout(self):
+        weight = self.node.style["font-weight"]
+        style = self.node.style["font-style"]
+        if style == "normal":
+            style = "roman"
+        size = int(float(self.node.style["font-size"][:-2]) * .75)
+
+        self.font = get_font(size, weight, style)
+        self.width = self.font.measure(self.word)
+
+        if self.previous:
+            space = self.previous.font.measure(" ")
+            self.x = self.previous.x + self.previous.width + space
+        else:
+            self.x = self.parent.x
+
+        self.height = self.font.metrics("linespace")
+
+    def paint(self):
+        color = self.node.style["color"]
+        return [DrawText(self.x, self.y, self.word, self.font, color)]
 
 
 class DrawText:
@@ -741,7 +797,7 @@ class Browser:
         logging.info("Styled document")
 
         self.document = DocumentLayout(self.nodes)
-        # print_tree(self.document.node)
+        print_tree(self.document.node)
         self.document.layout()
         logging.info("Laid out document: width=%d, height=%d",
                      self.document.width, self.document.height)
