@@ -200,7 +200,7 @@ class HTMLParser:
                 in_tag = True
                 if text:
                     self.add_text(text)
-                    text = ""
+                text = ""
             elif c == ">":
                 in_tag = False
                 self.add_tag(text)
@@ -267,7 +267,7 @@ class HTMLParser:
                 self.add_tag("html")
 
             # <head> または <body> が省略されている
-            elif open_tags == ["html"] and tag not in ["head", "body"]:
+            elif open_tags == ["html"] and tag not in ["head", "body", "/html"]:
                 if tag in self.HEAD_TAGS:
                     self.add_tag("head")
                 else:
@@ -520,7 +520,8 @@ class BlockLayout:
         self.parent = parent
         self.previous = previous
         self.children = []
-        self.display_list = []
+        self.display_list: list[tuple[int, float,
+                                      str, tkinter.font.Font, str]] = []
         self.x: int = 0
         self.y: int = 0
         self.width: int = 0
@@ -554,9 +555,6 @@ class BlockLayout:
         else:
             self.cursor_x = 0
             self.cursor_y = 0
-            self.weight = "normal"
-            self.style = "roman"
-            self.size = 12
 
             self.line = []
             self.recurse(self.node)
@@ -566,44 +564,20 @@ class BlockLayout:
             child.layout()
 
         if mode == "block":
-            self.height = sum(child.height for child in self.children)
+            self.height = sum([child.height for child in self.children])
         else:
             self.height = self.cursor_y
 
-    def recurse(self, tree):
-        if isinstance(tree, Text):
-            for word in tree.text.split():
-                self.word(word)
+    def recurse(self, node):
+        if isinstance(node, Text):
+            for word in node.text.split():
+                self.word(node, word)
         else:
-            self.open_tag(tree.tag)
-            for child in tree.children:
+            if node.tag == "br":
+                self.flush()
+            for child in node.children:
                 self.recurse(child)
-            self.close_tag(tree.tag)
-
-    def open_tag(self, tag):
-        if tag == "i":
-            self.style = "italic"
-        elif tag == "b":
-            self.weight = "bold"
-        elif tag == "small":
-            self.size -= 2
-        elif tag == "big":
-            self.size += 4
-        elif tag == "br":
-            self.flush()
-
-    def close_tag(self, tag):
-        if tag == "i":
-            self.style = "roman"
-        elif tag == "b":
-            self.weight = "normal"
-        elif tag == "small":
-            self.size += 2
-        elif tag == "big":
-            self.size -= 4
-        elif tag == "p":
-            self.flush()
-            self.cursor_y += VSTEP
+        return self.display_list
 
     def flush(self):
         # 空行では何もしない
@@ -611,19 +585,21 @@ class BlockLayout:
             return
 
         # 行内の最大アセントを計算（レディングを考慮）
-        max_ascent = max(font.metrics("ascent") for _, _, font in self.line)
+        max_ascent = max([font.metrics("ascent")
+                         for _, _, font, _ in self.line])
 
         # ベースラインの y座標を計算
         baseline = self.cursor_y + 1.25 * max_ascent
 
         # 各単語をベースラインに合わせて配置
-        for rel_x, word, font in self.line:
+        for rel_x, word, font, color in self.line:
             x = self.x + rel_x
             y = self.y + baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font))
+            self.display_list.append((x, y, word, font, color))
 
         # 行内の最大ディセントを計算
-        max_descent = max(font.metrics("descent") for _, _, font in self.line)
+        max_descent = max([font.metrics("descent")
+                          for _, _, font, _ in self.line])
 
         # 次の行の y座標を更新（レディングを考慮）
         self.cursor_y = baseline + 1.25 * max_descent
@@ -632,44 +608,63 @@ class BlockLayout:
         self.cursor_x = 0
         self.line = []
 
-    def word(self, word):
-        font = get_font(self.size, self.weight, self.style)
-        w = font.measure(word)
+    def word(self, node, word):
+        color = node.style["color"]
+        weight = node.style["font-weight"]
+        style = node.style["font-style"]
+        if style == "normal":
+            style = "roman"
+        # レディングを考慮してフォントサイズを縮小
+        size = int(float(node.style["font-size"][:-2]) * .75)
 
-        # x座標、単語、フォントを現在の行に追加
-        self.line.append((self.cursor_x, word, font))
+        font = get_font(size, weight, style)
+        w = font.measure(word)
 
         # カーソルが右端を超えたら改行
         if self.cursor_x + w > self.width:
             self.flush()
 
+        # x座標、単語、フォント、カラーを現在の行に追加
+        self.line.append((self.cursor_x, word, font, color))
+
+        # カーソルを単語の幅だけ右に移動（スペース分も考慮）
         self.cursor_x += w + font.measure(" ")
 
     def paint(self):
         cmds = []
+        if self.layout_mode() == "inline":
+            for x, y, word, font, color in self.display_list:
+                cmds.append(
+                    DrawText(self.x + x, self.y + y, word, font, color))
+        if isinstance(self.node, Element) and self.node.tag == "pre":
+            x2, y2 = self.x + self.width, self.y + self.height
+            rect = DrawRect(self.x, self.y, x2, y2, "gray")
+            cmds.append(rect)
         bgcolor = self.node.style.get("background-color", "transparent")
-#        if isinstance(self.node, Element) and self.node.tag == "pre":
         if bgcolor != "transparent":
             x2, y2 = self.x + self.width, self.y + self.height
-            rect = DrawRect(self.x, self.y, x2, y2, bgcolor)  # "gray")
+            rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
             cmds.append(rect)
-        if self.layout_mode() == "inline":
-            for x, y, word, font in self.display_list:
-                cmds.append(DrawText(x, y, word, font))
         return cmds
 
 
 class DrawText:
-    def __init__(self, x1, y1, text, font):
+    def __init__(self, x1, y1, text, font, color):
         self.top = y1
         self.left = x1
         self.text = text
         self.font = font
         self.bottom = y1 + font.metrics("linespace")
+        self.color = color
 
     def execute(self, scroll, canvas):
         canvas.create_text(
-            self.left, self.top - scroll, text=self.text, anchor="nw", font=self.font)
+            self.left,
+            self.top - scroll,
+            text=self.text,
+            font=self.font,
+            anchor="nw",
+            fill=self.color)
 
 
 class DrawRect:
@@ -701,6 +696,7 @@ class Browser:
             self.window,
             width=WIDTH,
             height=HEIGHT,
+            bg="white",
         )
         self.canvas.pack()
         self.scroll = 0
@@ -745,6 +741,7 @@ class Browser:
         logging.info("Styled document")
 
         self.document = DocumentLayout(self.nodes)
+        # print_tree(self.document.node)
         self.document.layout()
         logging.info("Laid out document: width=%d, height=%d",
                      self.document.width, self.document.height)
@@ -753,7 +750,6 @@ class Browser:
         paint_tree(self.document, self.display_list)
         logging.info("Painted document: %d items in display list",
                      len(self.display_list))
-        # print_tree(self.document.node)
 
         self.draw()
         logging.info("Finished drawing document")
