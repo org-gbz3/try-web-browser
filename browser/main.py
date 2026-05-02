@@ -320,6 +320,7 @@ class CSSParser:
         self.i += 1
 
     def pair(self):
+        self.whitespace()
         prop = self.word()
         self.whitespace()
         self.literal(":")
@@ -391,6 +392,9 @@ class Tagselector:
     def matches(self, node):
         return isinstance(node, Element) and node.tag == self.tag
 
+    def __repr__(self) -> str:
+        return "<TagSelector {}>".format(self.tag)
+
 
 class DescendantSelector:
     def __init__(self, anncestor, descendant):
@@ -406,6 +410,9 @@ class DescendantSelector:
                 return True
             node = node.parent
         return False
+
+    def __repr__(self) -> str:
+        return "<DescendantSelector {} {}>".format(self.anncestor, self.descendant)
 
 
 FONTS = {}
@@ -797,7 +804,7 @@ class Browser:
         logging.info("Styled document")
 
         self.document = DocumentLayout(self.nodes)
-        print_tree(self.document.node)
+        # print_tree(self.document.node)
         self.document.layout()
         logging.info("Laid out document: width=%d, height=%d",
                      self.document.width, self.document.height)
