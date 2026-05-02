@@ -752,26 +752,14 @@ def paint_tree(layout_object, display_list):
 SCROLL_STEP = 100
 
 
-class Browser:
+class Tab:
     def __init__(self):
-        self.window = tk.Tk()
-        self.canvas = tk.Canvas(
-            self.window,
-            width=WIDTH,
-            height=HEIGHT,
-            bg="white",
-        )
-        self.canvas.pack()
         self.scroll = 0
         self.url: URL | None = None
 
-        # 下矢印キーに scrolldown メソッドをバインド
-        self.window.bind("<Down>", self.scrolldown)
-        self.window.bind("<Button-1>", self.click)
-
-    def click(self, e):
+    def click(self, x, y):
         assert self.url is not None
-        x, y = e.x, e.y + self.scroll
+        y += self.scroll
 
         # クリック位置で最後の要素からヒットテスト
         objs = [obj for obj in tree_to_list(self.document, [])
@@ -787,15 +775,14 @@ class Browser:
                 return self.load(url)
             elt = elt.parent
 
-    def draw(self):
-        self.canvas.delete("all")
+    def draw(self, canvas):
         for cmd in self.display_list:
             # 見えない範囲はスキップ
             if cmd.top > self.scroll + HEIGHT:
                 continue
             if cmd.bottom < self.scroll:
                 continue
-            cmd.execute(self.scroll, self.canvas)
+            cmd.execute(self.scroll, canvas)
 
     def load(self, url):
         self.url = url
@@ -835,17 +822,53 @@ class Browser:
         logging.info("Painted document: %d items in display list",
                      len(self.display_list))
 
-        self.draw()
-        logging.info("Finished drawing document")
-
-    def scrolldown(self, event):
+    def scrolldown(self):
         max_y = max(self.document.height + 2 * VSTEP - HEIGHT, 0)
         self.scroll = min(self.scroll + SCROLL_STEP, max_y)
+
+
+class Browser:
+    def __init__(self):
+        self.tabs = []
+        self.active_tab: Tab | None = None
+        self.window = tk.Tk()
+        self.canvas = tk.Canvas(
+            self.window,
+            width=WIDTH,
+            height=HEIGHT,
+            bg="white",
+        )
+        self.canvas.pack()
+
+        # 下矢印キーに scrolldown メソッドをバインド
+        self.window.bind("<Down>", self.handle_down)
+        self.window.bind("<Button-1>", self.handle_click)
+
+    def handle_down(self, e):
+        assert self.active_tab is not None
+        self.active_tab.scrolldown()
+        self.draw()
+
+    def handle_click(self, e):
+        assert self.active_tab is not None
+        self.active_tab.click(e.x, e.y)
+        self.draw()
+
+    def draw(self):
+        assert self.active_tab is not None
+        self.canvas.delete("all")
+        self.active_tab.draw(self.canvas)
+
+    def new_tab(self, url):
+        new_tab = Tab()
+        new_tab.load(url)
+        self.active_tab = new_tab
+        self.tabs.append(new_tab)
         self.draw()
 
 
 if __name__ == "__main__":
     import sys
 
-    Browser().load(URL(sys.argv[1]))
+    Browser().new_tab(URL(sys.argv[1]))
     tk.mainloop()
