@@ -763,9 +763,29 @@ class Browser:
         )
         self.canvas.pack()
         self.scroll = 0
+        self.url: URL | None = None
 
         # 下矢印キーに scrolldown メソッドをバインド
         self.window.bind("<Down>", self.scrolldown)
+        self.window.bind("<Button-1>", self.click)
+
+    def click(self, e):
+        assert self.url is not None
+        x, y = e.x, e.y + self.scroll
+
+        # クリック位置で最後の要素からヒットテスト
+        objs = [obj for obj in tree_to_list(self.document, [])
+                if obj.x <= x < obj.x + obj.width and obj.y <= y < obj.y + obj.height]
+        if not objs:
+            return
+        elt = objs[-1].node
+        while elt:
+            if isinstance(elt, Text):
+                pass
+            elif elt.tag == "a" and "href" in elt.attributes:
+                url = self.url.resolve(elt.attributes["href"])
+                return self.load(url)
+            elt = elt.parent
 
     def draw(self):
         self.canvas.delete("all")
@@ -778,6 +798,7 @@ class Browser:
             cmd.execute(self.scroll, self.canvas)
 
     def load(self, url):
+        self.url = url
         body = url.request()
         logging.info("Received response: %d bytes", len(body))
 
