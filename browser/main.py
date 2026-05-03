@@ -8,6 +8,8 @@ from datetime import datetime
 from urllib.parse import quote, unquote_to_bytes
 from zoneinfo import ZoneInfo
 
+import dukpy
+
 
 # JST タイムゾーンの設定
 def jst_converter(*args):
@@ -989,6 +991,23 @@ class Tab:
         self.nodes = HTMLParser(body).parse()
         logging.info("Parsed HTML: %s", repr(self.nodes))
 
+        # JSを取得し実行する
+        scripts = [node.attributes["src"]
+                   for node in tree_to_list(self.nodes, [])
+                   if isinstance(node, Element) and node.tag == "script" and "src" in node.attributes]
+        for script in scripts:
+            script_url = url.resolve(script)
+            try:
+                body = script_url.request()
+            except Exception:
+                logging.warning("Failed to load script: %s",
+                                script_url.data_url if script_url.scheme == "data" else str(script_url))
+                continue
+            logging.info("Loaded script: %s",
+                         script_url.data_url if script_url.scheme == "data" else str(script_url))
+            print("Script returned: ", dukpy.evaljs(body))
+
+        # CSSルールを読み込む
         self.rules = DEFAULT_STYLE_SHEET.copy()
         links = [node.attributes["href"]
                  for node in tree_to_list(self.nodes, [])
