@@ -5,7 +5,7 @@ import socket
 import tkinter as tk
 import tkinter.font
 from datetime import datetime
-from urllib.parse import unquote_to_bytes
+from urllib.parse import quote, unquote_to_bytes
 from zoneinfo import ZoneInfo
 
 
@@ -48,7 +48,7 @@ class URL:
             self.host, port = self.host.split(":", 1)
             self.port = int(port)
 
-    def request(self):
+    def request(self, payload=None):
         if self.scheme == "data":
             return self._decode_data_url()
 
@@ -66,11 +66,18 @@ class URL:
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             s = ctx.wrap_socket(s, server_hostname=self.host)
 
-        request = "GET {} HTTP/1.1\r\n".format(self.path)
+        method = "POST" if payload else "GET"
+
+        request = "{} {} HTTP/1.1\r\n".format(method, self.path)
         request += "Host: {}\r\n".format(self.host)
         request += "Connection: close\r\n"
         request += "User-Agent: Cheap-Browser/0.1.5\r\n"
+        if payload:
+            length = len(payload.encode("utf8"))
+            request += "Content-Length: {}\r\n".format(length)
         request += "\r\n"
+        if payload:
+            request += payload
 
         s.send(request.encode("utf8"))
 
@@ -942,7 +949,27 @@ class Tab:
                 self.focus = elt
                 elt.is_focused = True
                 return self.render()
+            elif elt.tag == "button":
+                while elt:
+                    if elt.tag == "form" and "action" in elt.attributes:
+                        return self.submit_form(elt)
+                    elt = elt.parent
             elt = elt.parent
+
+    def submit_form(self, elt):
+        assert self.url is not None
+        inputs = [node for node in tree_to_list(elt, [])
+                  if isinstance(node, Element) and node.tag == "input" and "name" in node.attributes]
+        body = ""
+        for input in inputs:
+            name = input.attributes["name"]
+            name = quote(name)
+            value = input.attributes.get("value", "")
+            value = quote(value)
+            body += "{}={}&".format(name, value)
+        body = body[:-1]
+        url = self.url.resolve(elt.attributes["action"])
+        self.load(url, body)
 
     def draw(self, canvas, offset):
         for cmd in self.display_list:
@@ -953,10 +980,10 @@ class Tab:
                 continue
             cmd.execute(self.scroll - offset, canvas)
 
-    def load(self, url):
+    def load(self, url, payload=None):
         self.history.append(url)
         self.url = url
-        body = url.request()
+        body = url.request(payload)
         logging.info("Received response: %d bytes", len(body))
 
         self.nodes = HTMLParser(body).parse()
