@@ -139,6 +139,8 @@ class URL:
             return URL("{}://{}:{}{}".format(self.scheme, self.host, self.port, url))
 
     def __str__(self) -> str:
+        if self.data_url:
+            return self.data_url
         port_part = ":" + str(self.port)
         if self.scheme == "https" and self.port == 443:
             port_part = ""
@@ -153,6 +155,7 @@ class Text:
         self.children = []
         self.parent = parent
         self.style = {}
+        self.is_focused = False
 
     def __repr__(self) -> str:
         return repr(self.text)
@@ -165,6 +168,7 @@ class Element:
         self.children = []
         self.parent = parent
         self.style = {}
+        self.is_focused = False
 
     def __repr__(self) -> str:
         return "<{}>".format(self.tag)
@@ -819,6 +823,10 @@ class InputLayout:
             else:
                 print("Ignoring HTML contents inside button")
                 text = ""
+        if self.node.is_focused:
+            cx = self.x + self.font.measure(text)
+            cmds.append(DrawLine(cx, self.y, cx,
+                        self.y + self.height, "black", 1))
         color = self.node.style["color"]
         cmds.append(DrawText(self.x, self.y, text, self.font, color))
         return cmds
@@ -908,8 +916,10 @@ class Tab:
         self.url: URL | None = None
         self.tab_height = tab_height
         self.history = []
+        self.focus = None
 
     def click(self, x, y):
+        self.focus = None
         assert self.url is not None
         y += self.scroll
 
@@ -925,6 +935,13 @@ class Tab:
             elif elt.tag == "a" and "href" in elt.attributes:
                 url = self.url.resolve(elt.attributes["href"])
                 return self.load(url)
+            elif elt.tag == "input":
+                elt.attributes["value"] = ""
+                if self.focus:
+                    self.focus.is_focused = False
+                self.focus = elt
+                elt.is_focused = True
+                return self.render()
             elt = elt.parent
 
     def draw(self, canvas, offset):
@@ -945,7 +962,7 @@ class Tab:
         self.nodes = HTMLParser(body).parse()
         logging.info("Parsed HTML: %s", repr(self.nodes))
 
-        rules = DEFAULT_STYLE_SHEET.copy()
+        self.rules = DEFAULT_STYLE_SHEET.copy()
         links = [node.attributes["href"]
                  for node in tree_to_list(self.nodes, [])
                  if isinstance(node, Element) and node.tag == "link"
@@ -958,22 +975,18 @@ class Tab:
                 logging.warning("Failed to load stylesheet: %s",
                                 style_url.data_url if style_url.scheme == "data" else str(style_url))
                 continue
-            rules.extend(CSSParser(body).parse())
+            self.rules.extend(CSSParser(body).parse())
             logging.info("Loaded stylesheet: %s",
                          style_url.data_url if style_url.scheme == "data" else str(style_url))
-        style(self.nodes, sorted(rules, key=cascade_priority))
-        logging.info("Styled document")
+        self.render()
 
+    def render(self):
+        style(self.nodes, sorted(self.rules, key=cascade_priority))
         self.document = DocumentLayout(self.nodes)
         # print_tree(self.document.node)
         self.document.layout()
-        logging.info("Laid out document: width=%d, height=%d",
-                     self.document.width, self.document.height)
-
         self.display_list = []
         paint_tree(self.document, self.display_list)
-        logging.info("Painted document: %d items in display list",
-                     len(self.display_list))
 
     def scrolldown(self):
         max_y = max(self.document.height + 2 * VSTEP - self.tab_height, 0)
@@ -984,6 +997,11 @@ class Tab:
             self.history.pop()
             back = self.history.pop()
             self.load(back)
+
+    def keypress(self, char):
+        if self.focus:
+            self.focus.attributes["value"] += char
+            self.render()
 
 
 class Chrome:
@@ -1130,11 +1148,16 @@ class Chrome:
     def keypress(self, char):
         if self.focus == "address bar":
             self.address_bar += char
+            return True
+        return False
 
     def enter(self):
         if self.focus == "address bar":
             self.browser.active_tab.load(URL(self.address_bar))
             self.focus = None
+
+    def blur(self):
+        self.focus = None
 
 
 class Browser:
@@ -1166,8 +1189,11 @@ class Browser:
     def handle_click(self, e):
         assert self.active_tab is not None
         if e.y < self.chrome.bottom:
+            self.focus = None
             self.chrome.click(e.x, e.y)
         else:
+            self.focus = "content"
+            self.chrome.blur()
             tab_y = e.y - self.chrome.bottom
             self.active_tab.click(e.x, tab_y)
         self.draw()
@@ -1191,8 +1217,11 @@ class Browser:
             return
         if not (0x20 <= ord(e.char) <= 0x7E):
             return
-        self.chrome.keypress(e.char)
-        self.draw()
+        if self.chrome.keypress(e.char):
+            self.draw()
+        elif self.focus == "content":
+            self.active_tab.keypress(e.char)
+            self.draw()
 
     def handle_enter(self, e):
         self.chrome.enter()
