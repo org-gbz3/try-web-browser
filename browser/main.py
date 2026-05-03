@@ -138,8 +138,13 @@ class URL:
         else:
             return URL("{}://{}:{}{}".format(self.scheme, self.host, self.port, url))
 
-    def __repr__(self) -> str:
-        return "<URL {}://{}:{}{}>".format(self.scheme, self.host, self.port, self.path)
+    def __str__(self) -> str:
+        port_part = ":" + str(self.port)
+        if self.scheme == "https" and self.port == 443:
+            port_part = ""
+        if self.scheme == "http" and self.port == 80:
+            port_part = ""
+        return "{}://{}{}{}".format(self.scheme, self.host, port_part, self.path)
 
 
 class Text:
@@ -807,6 +812,7 @@ class Tab:
         self.scroll = 0
         self.url: URL | None = None
         self.tab_height = tab_height
+        self.history = []
 
     def click(self, x, y):
         assert self.url is not None
@@ -836,6 +842,7 @@ class Tab:
             cmd.execute(self.scroll - offset, canvas)
 
     def load(self, url):
+        self.history.append(url)
         self.url = url
         body = url.request()
         logging.info("Received response: %d bytes", len(body))
@@ -877,6 +884,12 @@ class Tab:
         max_y = max(self.document.height + 2 * VSTEP - self.tab_height, 0)
         self.scroll = min(self.scroll + SCROLL_STEP, max_y)
 
+    def go_back(self):
+        if len(self.history) > 1:
+            self.history.pop()
+            back = self.history.pop()
+            self.load(back)
+
 
 class Chrome:
     def __init__(self, browser):
@@ -884,6 +897,8 @@ class Chrome:
         self.font = get_font(20, "normal", "roman")
         self.font_height = self.font.metrics("linespace")
         self.padding = 5
+
+        # タブバー関連のプロパティ
         self.tabbar_top = 0
         self.tabbar_bottom = self.font_height + 2 * self.padding
         plus_width = self.font.measure("+") + 2 * self.padding
@@ -893,7 +908,26 @@ class Chrome:
             self.padding + plus_width,
             self.padding + self.font_height,
         )
-        self.bottom = self.tabbar_bottom
+
+        # URLバー関連のプロパティ
+        self.urlbar_top = self.tabbar_bottom
+        self.urlbar_bottom = self.urlbar_top + self.font_height + 2 * self.padding
+        back_width = self.font.measure("<") + 2 * self.padding
+        self.back_rect = Rect(
+            self.padding,
+            self.urlbar_top + self.padding,
+            self.padding + back_width,
+            self.urlbar_bottom - self.padding,
+        )
+        self.address_rect = Rect(
+            self.back_rect.right + self.padding,
+            self.urlbar_top + self.padding,
+            WIDTH - self.padding,
+            self.urlbar_bottom - self.padding,
+        )
+
+        # クローム全体の高さ
+        self.bottom = self.urlbar_bottom
 
     def tab_rect(self, i):
         tabs_start = self.newtab_rect.right + self.padding
@@ -907,8 +941,11 @@ class Chrome:
 
     def paint(self):
         cmds = []
+        # クロームの背景と区切り線の描画
         cmds.append(DrawRect(Rect(0, 0, WIDTH, self.bottom), "white"))
         cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, "black", 1))
+
+        # タブバーの描画
         cmds.append(DrawOutline(self.newtab_rect, "black", 1))
         cmds.append(DrawText(
             self.newtab_rect.left + self.padding,
@@ -937,11 +974,34 @@ class Chrome:
                             bounds.bottom, "black", 1))
                 cmds.append(DrawLine(bounds.right, bounds.bottom, WIDTH,
                             bounds.bottom, "black", 1))
+
+        # URLバーの描画
+        cmds.append(DrawOutline(self.back_rect, "black", 1))
+        cmds.append(DrawText(
+            self.back_rect.left + self.padding,
+            self.back_rect.top,
+            "<",
+            self.font,
+            "black",
+        ))
+        cmds.append(DrawOutline(self.address_rect, "black", 1))
+        url = str(
+            self.browser.active_tab.url) if self.browser.active_tab and self.browser.active_tab.url else ""
+        cmds.append(DrawText(
+            self.address_rect.left + self.padding,
+            self.address_rect.top,
+            url,
+            self.font,
+            "black",
+        ))
+
         return cmds
 
     def click(self, x, y):
         if self.newtab_rect.containsPoint(x, y):
             self.browser.new_tab(URL("https://browser.engineering/"))
+        elif self.back_rect.containsPoint(x, y):
+            self.browser.active_tab.go_back()
         else:
             for i, tab in enumerate(self.browser.tabs):
                 if self.tab_rect(i).containsPoint(x, y):
