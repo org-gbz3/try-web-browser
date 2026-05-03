@@ -925,6 +925,8 @@ class Chrome:
             WIDTH - self.padding,
             self.urlbar_bottom - self.padding,
         )
+        self.focus = None
+        self.address_bar = ""
 
         # クローム全体の高さ
         self.bottom = self.urlbar_bottom
@@ -985,28 +987,59 @@ class Chrome:
             "black",
         ))
         cmds.append(DrawOutline(self.address_rect, "black", 1))
-        url = str(
-            self.browser.active_tab.url) if self.browser.active_tab and self.browser.active_tab.url else ""
-        cmds.append(DrawText(
-            self.address_rect.left + self.padding,
-            self.address_rect.top,
-            url,
-            self.font,
-            "black",
-        ))
+        if self.focus == "address bar":
+            cmds.append(DrawText(
+                self.address_rect.left + self.padding,
+                self.address_rect.top,
+                self.address_bar,
+                self.font,
+                "black",
+            ))
+            w = self.font.measure(self.address_bar)
+            cmds.append(DrawLine(
+                self.address_rect.left + self.padding + w,
+                self.address_rect.top,
+                self.address_rect.left + self.padding + w,
+                self.address_rect.bottom,
+                "red",
+                1,
+            ))
+        else:
+            url = str(
+                self.browser.active_tab.url) if self.browser.active_tab and self.browser.active_tab.url else ""
+            cmds.append(DrawText(
+                self.address_rect.left + self.padding,
+                self.address_rect.top,
+                url,
+                self.font,
+                "black",
+            ))
 
         return cmds
 
     def click(self, x, y):
+        self.focus = None
         if self.newtab_rect.containsPoint(x, y):
             self.browser.new_tab(URL("https://browser.engineering/"))
         elif self.back_rect.containsPoint(x, y):
             self.browser.active_tab.go_back()
+        elif self.address_rect.containsPoint(x, y):
+            self.focus = "address bar"
+            self.address_bar = ""
         else:
             for i, tab in enumerate(self.browser.tabs):
                 if self.tab_rect(i).containsPoint(x, y):
                     self.browser.active_tab = tab
                     break
+
+    def keypress(self, char):
+        if self.focus == "address bar":
+            self.address_bar += char
+
+    def enter(self):
+        if self.focus == "address bar":
+            self.browser.active_tab.load(URL(self.address_bar))
+            self.focus = None
 
 
 class Browser:
@@ -1025,6 +1058,8 @@ class Browser:
         # 下矢印キーに scrolldown メソッドをバインド
         self.window.bind("<Down>", self.handle_down)
         self.window.bind("<Button-1>", self.handle_click)
+        self.window.bind("<Key>", self.handle_key)
+        self.window.bind("<Return>", self.handle_enter)
 
         self.chrome = Chrome(self)
 
@@ -1054,6 +1089,18 @@ class Browser:
         new_tab.load(url)
         self.active_tab = new_tab
         self.tabs.append(new_tab)
+        self.draw()
+
+    def handle_key(self, e):
+        if len(e.char) == 0:
+            return
+        if not (0x20 <= ord(e.char) <= 0x7E):
+            return
+        self.chrome.keypress(e.char)
+        self.draw()
+
+    def handle_enter(self, e):
+        self.chrome.enter()
         self.draw()
 
 
