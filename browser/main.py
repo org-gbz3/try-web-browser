@@ -5,7 +5,7 @@ import socket
 import tkinter as tk
 import tkinter.font
 from datetime import datetime
-from urllib.parse import unquote_to_bytes
+from urllib.parse import quote, unquote_to_bytes
 from zoneinfo import ZoneInfo
 
 
@@ -48,7 +48,7 @@ class URL:
             self.host, port = self.host.split(":", 1)
             self.port = int(port)
 
-    def request(self):
+    def request(self, payload=None):
         if self.scheme == "data":
             return self._decode_data_url()
 
@@ -66,11 +66,18 @@ class URL:
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             s = ctx.wrap_socket(s, server_hostname=self.host)
 
-        request = "GET {} HTTP/1.1\r\n".format(self.path)
+        method = "POST" if payload else "GET"
+
+        request = "{} {} HTTP/1.1\r\n".format(method, self.path)
         request += "Host: {}\r\n".format(self.host)
         request += "Connection: close\r\n"
         request += "User-Agent: Cheap-Browser/0.1.5\r\n"
+        if payload:
+            length = len(payload.encode("utf8"))
+            request += "Content-Length: {}\r\n".format(length)
         request += "\r\n"
+        if payload:
+            request += payload
 
         s.send(request.encode("utf8"))
 
@@ -139,6 +146,8 @@ class URL:
             return URL("{}://{}:{}{}".format(self.scheme, self.host, self.port, url))
 
     def __str__(self) -> str:
+        if self.data_url:
+            return self.data_url
         port_part = ":" + str(self.port)
         if self.scheme == "https" and self.port == 443:
             port_part = ""
@@ -153,6 +162,7 @@ class Text:
         self.children = []
         self.parent = parent
         self.style = {}
+        self.is_focused = False
 
     def __repr__(self) -> str:
         return repr(self.text)
@@ -165,6 +175,7 @@ class Element:
         self.children = []
         self.parent = parent
         self.style = {}
+        self.is_focused = False
 
     def __repr__(self) -> str:
         return "<{}>".format(self.tag)
@@ -521,6 +532,9 @@ class DocumentLayout:
         self.width: int = 0
         self.height: int = 0
 
+    def should_paint(self):
+        return True
+
     def layout(self):
         child = BlockLayout(self.node, self, None)
         self.children.append(child)
@@ -553,10 +567,15 @@ class BlockLayout:
             return "inline"
         elif any([isinstance(child, Element) and child.tag in BLOCK_ELEMENTS for child in self.node.children]):
             return "block"
+        elif self.node.children or self.node.tag == "input":
+            return "inline"
         elif self.node.children:
             return "inline"
         else:
             return "block"
+
+    def should_paint(self):
+        return isinstance(self.node, Text) or (self.node.tag != "input" and self.node.tag != "button")
 
     def layout(self):
         self.x = self.parent.x
@@ -587,8 +606,31 @@ class BlockLayout:
             for word in node.text.split():
                 self.word(node, word)
         else:
-            for child in node.children:
-                self.recurse(child)
+            if node.tag == "br":
+                self.new_line()
+            elif node.tag in ["input", "button"]:
+                self.input(node)
+            else:
+                for child in node.children:
+                    self.recurse(child)
+
+    def input(self, node):
+        w = INPUT_WIDTH_PX
+        if self.cursor_x + w > self.width:
+            self.new_line()
+        line = self.children[-1]
+        previous_word = line.children[-1] if line.children else None
+        input = InputLayout(node, line, previous_word)
+        line.children.append(input)
+
+        weight = node.style["font-weight"]
+        style = node.style["font-style"]
+        if style == "normal":
+            style = "roman"
+        size = int(float(node.style["font-size"][:-2]) * .75)
+        font = get_font(size, weight, style)
+
+        self.cursor_x += w + font.measure(" ")
 
     def flush(self):
         # 空行では何もしない
@@ -665,6 +707,9 @@ class LineLayout:
         self.previous = previous
         self.children = []
 
+    def should_paint(self):
+        return True
+
     def layout(self):
         self.width = self.parent.width
         self.x = self.parent.x
@@ -707,6 +752,9 @@ class TextLayout:
         self.children = []
         self.y = 0  # LineLayout.layout() で配置されるまでの仮の値
 
+    def should_paint(self):
+        return True
+
     def layout(self):
         weight = self.node.style["font-weight"]
         style = self.node.style["font-style"]
@@ -728,6 +776,67 @@ class TextLayout:
     def paint(self):
         color = self.node.style["color"]
         return [DrawText(self.x, self.y, self.word, self.font, color)]
+
+
+INPUT_WIDTH_PX = 200
+
+
+class InputLayout:
+    def __init__(self, node, parent, previous):
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+        self.children = []
+        self.x = 0
+        self.y = 0
+        self.width = 0
+        self.height = 0
+
+    def self_rect(self):
+        return Rect(self.x, self.y, self.x + self.width, self.y + self.height)
+
+    def should_paint(self):
+        return True
+
+    def layout(self):
+        weight = self.node.style["font-weight"]
+        style = self.node.style["font-style"]
+        if style == "normal":
+            style = "roman"
+        size = int(float(self.node.style["font-size"][:-2]) * .75)
+
+        self.font = get_font(size, weight, style)
+        self.width = INPUT_WIDTH_PX
+
+        if self.previous:
+            space = self.previous.font.measure(" ")
+            self.x = self.previous.x + self.previous.width + space
+        else:
+            self.x = self.parent.x
+
+        self.height = self.font.metrics("linespace")
+
+    def paint(self):
+        cmds = []
+        bgcolor = self.node.style.get("background-color", "transparent")
+        if bgcolor != "transparent":
+            rect = DrawRect(self.self_rect(), bgcolor)
+            cmds.append(rect)
+        if self.node.tag == "input":
+            text = self.node.attributes.get("value", "")
+        elif self.node.tag == "button":
+            if len(self.node.children) == 1 and isinstance(self.node.children[0], Text):
+                text = self.node.children[0].text
+            else:
+                print("Ignoring HTML contents inside button")
+                text = ""
+        if self.node.is_focused:
+            cx = self.x + self.font.measure(text)
+            cmds.append(DrawLine(cx, self.y, cx,
+                        self.y + self.height, "black", 1))
+        color = self.node.style["color"]
+        cmds.append(DrawText(self.x, self.y, text, self.font, color))
+        return cmds
 
 
 class DrawText:
@@ -799,7 +908,8 @@ class DrawOutline:
 
 
 def paint_tree(layout_object, display_list):
-    display_list.extend(layout_object.paint())
+    if layout_object.should_paint():
+        display_list.extend(layout_object.paint())
     for child in layout_object.children:
         paint_tree(child, display_list)
 
@@ -813,8 +923,10 @@ class Tab:
         self.url: URL | None = None
         self.tab_height = tab_height
         self.history = []
+        self.focus = None
 
     def click(self, x, y):
+        self.focus = None
         assert self.url is not None
         y += self.scroll
 
@@ -830,7 +942,34 @@ class Tab:
             elif elt.tag == "a" and "href" in elt.attributes:
                 url = self.url.resolve(elt.attributes["href"])
                 return self.load(url)
+            elif elt.tag == "input":
+                elt.attributes["value"] = ""
+                if self.focus:
+                    self.focus.is_focused = False
+                self.focus = elt
+                elt.is_focused = True
+                return self.render()
+            elif elt.tag == "button":
+                while elt:
+                    if elt.tag == "form" and "action" in elt.attributes:
+                        return self.submit_form(elt)
+                    elt = elt.parent
             elt = elt.parent
+
+    def submit_form(self, elt):
+        assert self.url is not None
+        inputs = [node for node in tree_to_list(elt, [])
+                  if isinstance(node, Element) and node.tag == "input" and "name" in node.attributes]
+        body = ""
+        for input in inputs:
+            name = input.attributes["name"]
+            name = quote(name)
+            value = input.attributes.get("value", "")
+            value = quote(value)
+            body += "{}={}&".format(name, value)
+        body = body[:-1]
+        url = self.url.resolve(elt.attributes["action"])
+        self.load(url, body)
 
     def draw(self, canvas, offset):
         for cmd in self.display_list:
@@ -841,16 +980,16 @@ class Tab:
                 continue
             cmd.execute(self.scroll - offset, canvas)
 
-    def load(self, url):
+    def load(self, url, payload=None):
         self.history.append(url)
         self.url = url
-        body = url.request()
+        body = url.request(payload)
         logging.info("Received response: %d bytes", len(body))
 
         self.nodes = HTMLParser(body).parse()
         logging.info("Parsed HTML: %s", repr(self.nodes))
 
-        rules = DEFAULT_STYLE_SHEET.copy()
+        self.rules = DEFAULT_STYLE_SHEET.copy()
         links = [node.attributes["href"]
                  for node in tree_to_list(self.nodes, [])
                  if isinstance(node, Element) and node.tag == "link"
@@ -863,22 +1002,18 @@ class Tab:
                 logging.warning("Failed to load stylesheet: %s",
                                 style_url.data_url if style_url.scheme == "data" else str(style_url))
                 continue
-            rules.extend(CSSParser(body).parse())
+            self.rules.extend(CSSParser(body).parse())
             logging.info("Loaded stylesheet: %s",
                          style_url.data_url if style_url.scheme == "data" else str(style_url))
-        style(self.nodes, sorted(rules, key=cascade_priority))
-        logging.info("Styled document")
+        self.render()
 
+    def render(self):
+        style(self.nodes, sorted(self.rules, key=cascade_priority))
         self.document = DocumentLayout(self.nodes)
         # print_tree(self.document.node)
         self.document.layout()
-        logging.info("Laid out document: width=%d, height=%d",
-                     self.document.width, self.document.height)
-
         self.display_list = []
         paint_tree(self.document, self.display_list)
-        logging.info("Painted document: %d items in display list",
-                     len(self.display_list))
 
     def scrolldown(self):
         max_y = max(self.document.height + 2 * VSTEP - self.tab_height, 0)
@@ -889,6 +1024,11 @@ class Tab:
             self.history.pop()
             back = self.history.pop()
             self.load(back)
+
+    def keypress(self, char):
+        if self.focus:
+            self.focus.attributes["value"] += char
+            self.render()
 
 
 class Chrome:
@@ -1035,11 +1175,16 @@ class Chrome:
     def keypress(self, char):
         if self.focus == "address bar":
             self.address_bar += char
+            return True
+        return False
 
     def enter(self):
         if self.focus == "address bar":
             self.browser.active_tab.load(URL(self.address_bar))
             self.focus = None
+
+    def blur(self):
+        self.focus = None
 
 
 class Browser:
@@ -1071,8 +1216,11 @@ class Browser:
     def handle_click(self, e):
         assert self.active_tab is not None
         if e.y < self.chrome.bottom:
+            self.focus = None
             self.chrome.click(e.x, e.y)
         else:
+            self.focus = "content"
+            self.chrome.blur()
             tab_y = e.y - self.chrome.bottom
             self.active_tab.click(e.x, tab_y)
         self.draw()
@@ -1096,8 +1244,11 @@ class Browser:
             return
         if not (0x20 <= ord(e.char) <= 0x7E):
             return
-        self.chrome.keypress(e.char)
-        self.draw()
+        if self.chrome.keypress(e.char):
+            self.draw()
+        elif self.focus == "content":
+            self.active_tab.keypress(e.char)
+            self.draw()
 
     def handle_enter(self, e):
         self.chrome.enter()
