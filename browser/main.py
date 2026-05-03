@@ -146,7 +146,7 @@ class URL:
             return URL("{}://{}:{}{}".format(self.scheme, self.host, self.port, url))
 
     def __str__(self) -> str:
-        if self.data_url:
+        if self.scheme == "data":
             return self.data_url
         port_part = ":" + str(self.port)
         if self.scheme == "https" and self.port == 443:
