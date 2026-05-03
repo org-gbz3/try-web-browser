@@ -1259,6 +1259,7 @@ class Browser:
         self.draw()
 
     def handle_key(self, e):
+        assert self.active_tab is not None
         if len(e.char) == 0:
             return
         if not (0x20 <= ord(e.char) <= 0x7E):
