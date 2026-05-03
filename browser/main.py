@@ -138,8 +138,13 @@ class URL:
         else:
             return URL("{}://{}:{}{}".format(self.scheme, self.host, self.port, url))
 
-    def __repr__(self) -> str:
-        return "<URL {}://{}:{}{}>".format(self.scheme, self.host, self.port, self.path)
+    def __str__(self) -> str:
+        port_part = ":" + str(self.port)
+        if self.scheme == "https" and self.port == 443:
+            port_part = ""
+        if self.scheme == "http" and self.port == 80:
+            port_part = ""
+        return "{}://{}{}{}".format(self.scheme, self.host, port_part, self.path)
 
 
 class Text:
@@ -320,6 +325,7 @@ class CSSParser:
         self.i += 1
 
     def pair(self):
+        self.whitespace()
         prop = self.word()
         self.whitespace()
         self.literal(":")
@@ -391,6 +397,9 @@ class Tagselector:
     def matches(self, node):
         return isinstance(node, Element) and node.tag == self.tag
 
+    def __repr__(self) -> str:
+        return "<TagSelector {}>".format(self.tag)
+
 
 class DescendantSelector:
     def __init__(self, anncestor, descendant):
@@ -406,6 +415,9 @@ class DescendantSelector:
                 return True
             node = node.parent
         return False
+
+    def __repr__(self) -> str:
+        return "<DescendantSelector {} {}>".format(self.anncestor, self.descendant)
 
 
 FONTS = {}
@@ -476,6 +488,19 @@ def cascade_priority(rule):
 
 WIDTH, HEIGHT = 800, 600
 HSTEP, VSTEP = 13, 18
+
+
+class Rect:
+    def __init__(self, left, top, right, bottom):
+        self.left = left
+        self.top = top
+        self.right = right
+        self.bottom = bottom
+
+    def containsPoint(self, x, y):
+        return self.left <= x < self.right and self.top <= y < self.bottom
+
+
 BLOCK_ELEMENTS = [
     "html", "body", "article", "section", "nav", "aside",
     "h1", "h2", "h3", "h4", "h5", "h6", "hgroup", "header",
@@ -508,8 +533,6 @@ class DocumentLayout:
         child.layout()
         self.height = child.height
 
-        # self.display_list = child.display_list
-
     def paint(self):
         return []
 
@@ -520,8 +543,6 @@ class BlockLayout:
         self.parent = parent
         self.previous = previous
         self.children = []
-        self.display_list: list[tuple[int, float,
-                                      str, tkinter.font.Font, str]] = []
         self.x: int = 0
         self.y: int = 0
         self.width: int = 0
@@ -553,31 +574,21 @@ class BlockLayout:
                 self.children.append(next)
                 previous = next
         else:
-            self.cursor_x = 0
-            self.cursor_y = 0
-
-            self.line = []
+            self.new_line()
             self.recurse(self.node)
-            self.flush()
 
         for child in self.children:
             child.layout()
 
-        if mode == "block":
-            self.height = sum([child.height for child in self.children])
-        else:
-            self.height = self.cursor_y
+        self.height = sum([child.height for child in self.children])
 
     def recurse(self, node):
         if isinstance(node, Text):
             for word in node.text.split():
                 self.word(node, word)
         else:
-            if node.tag == "br":
-                self.flush()
             for child in node.children:
                 self.recurse(child)
-        return self.display_list
 
     def flush(self):
         # 空行では何もしない
@@ -591,12 +602,6 @@ class BlockLayout:
         # ベースラインの y座標を計算
         baseline = self.cursor_y + 1.25 * max_ascent
 
-        # 各単語をベースラインに合わせて配置
-        for rel_x, word, font, color in self.line:
-            x = self.x + rel_x
-            y = self.y + baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font, color))
-
         # 行内の最大ディセントを計算
         max_descent = max([font.metrics("descent")
                           for _, _, font, _ in self.line])
@@ -609,7 +614,6 @@ class BlockLayout:
         self.line = []
 
     def word(self, node, word):
-        color = node.style["color"]
         weight = node.style["font-weight"]
         style = node.style["font-style"]
         if style == "normal":
@@ -622,45 +626,122 @@ class BlockLayout:
 
         # カーソルが右端を超えたら改行
         if self.cursor_x + w > self.width:
-            self.flush()
+            self.new_line()
 
-        # x座標、単語、フォント、カラーを現在の行に追加
-        self.line.append((self.cursor_x, word, font, color))
+        # 行に単語を追加
+        line = self.children[-1]
+        previous_word = line.children[-1] if line.children else None
+        text = TextLayout(node, word, line, previous_word)
+        line.children.append(text)
 
         # カーソルを単語の幅だけ右に移動（スペース分も考慮）
         self.cursor_x += w + font.measure(" ")
 
+    def new_line(self):
+        self.cursor_x = 0
+        last_line = self.children[-1] if self.children else None
+        new_line = LineLayout(self.node, self, last_line)
+        self.children.append(new_line)
+
+    def self_rect(self):
+        return Rect(self.x, self.y, self.x + self.width, self.y + self.height)
+
     def paint(self):
         cmds = []
         if isinstance(self.node, Element) and self.node.tag == "pre":
-            x2, y2 = self.x + self.width, self.y + self.height
-            rect = DrawRect(self.x, self.y, x2, y2, "gray")
+            rect = DrawRect(self.self_rect(), "gray")
             cmds.append(rect)
         bgcolor = self.node.style.get("background-color", "transparent")
         if bgcolor != "transparent":
-            x2, y2 = self.x + self.width, self.y + self.height
-            rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
+            rect = DrawRect(self.self_rect(), bgcolor)
             cmds.append(rect)
-        if self.layout_mode() == "inline":
-            for x, y, word, font, color in self.display_list:
-                cmds.append(
-                    DrawText(x, y, word, font, color))
         return cmds
+
+
+class LineLayout:
+    def __init__(self, node, parent, previous):
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+        self.children = []
+
+    def layout(self):
+        self.width = self.parent.width
+        self.x = self.parent.x
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+
+        for word in self.children:
+            word.layout()
+
+        # 行内の最大アセントを計算（レディングを考慮）
+        max_ascent = max([word.font.metrics("ascent")
+                         for word in self.children])
+
+        # ベースラインの y座標を計算
+        baseline = self.y + 1.25 * max_ascent
+
+        # 各単語をベースラインに合わせて配置
+        for word in self.children:
+            word.y = baseline - word.font.metrics("ascent")
+
+        # 行内の最大ディセントを計算
+        max_descent = max([word.font.metrics("descent")
+                          for word in self.children])
+
+        # 行の高さを更新（レディングを考慮）
+        self.height = 1.25 * (max_ascent + max_descent)
+
+    def paint(self):
+        return []
+
+
+class TextLayout:
+    def __init__(self, node, word, parent, previous):
+        self.node = node
+        self.word = word
+        self.parent = parent
+        self.previous = previous
+        self.children = []
+        self.y = 0  # LineLayout.layout() で配置されるまでの仮の値
+
+    def layout(self):
+        weight = self.node.style["font-weight"]
+        style = self.node.style["font-style"]
+        if style == "normal":
+            style = "roman"
+        size = int(float(self.node.style["font-size"][:-2]) * .75)
+
+        self.font = get_font(size, weight, style)
+        self.width = self.font.measure(self.word)
+
+        if self.previous:
+            space = self.previous.font.measure(" ")
+            self.x = self.previous.x + self.previous.width + space
+        else:
+            self.x = self.parent.x
+
+        self.height = self.font.metrics("linespace")
+
+    def paint(self):
+        color = self.node.style["color"]
+        return [DrawText(self.x, self.y, self.word, self.font, color)]
 
 
 class DrawText:
     def __init__(self, x1, y1, text, font, color):
-        self.top = y1
-        self.left = x1
         self.text = text
         self.font = font
-        self.bottom = y1 + font.metrics("linespace")
+        self.rect = Rect(x1, y1, x1 + font.measure(text),
+                         y1 + font.metrics("linespace"))
         self.color = color
 
     def execute(self, scroll, canvas):
         canvas.create_text(
-            self.left,
-            self.top - scroll,
+            self.rect.left,
+            self.rect.top - scroll,
             text=self.text,
             font=self.font,
             anchor="nw",
@@ -668,16 +749,53 @@ class DrawText:
 
 
 class DrawRect:
-    def __init__(self, x1, y1, x2, y2, color):
-        self.top = y1
-        self.left = x1
-        self.bottom = y2
-        self.right = x2
+    def __init__(self, rect, color):
         self.color = color
+        self.rect = rect
 
     def execute(self, scroll, canvas):
         canvas.create_rectangle(
-            self.left, self.top - scroll, self.right, self.bottom - scroll, width=0, fill=self.color)
+            self.rect.left,
+            self.rect.top - scroll,
+            self.rect.right,
+            self.rect.bottom - scroll,
+            width=0,
+            fill=self.color,
+        )
+
+
+class DrawLine:
+    def __init__(self, x1, y1, x2, y2, color, thickness):
+        self.rect = Rect(x1, y1, x2, y2)
+        self.color = color
+        self.thickness = thickness
+
+    def execute(self, scroll, canvas):
+        canvas.create_line(
+            self.rect.left,
+            self.rect.top - scroll,
+            self.rect.right,
+            self.rect.bottom - scroll,
+            fill=self.color,
+            width=self.thickness,
+        )
+
+
+class DrawOutline:
+    def __init__(self, rect, color, thickness):
+        self.rect = rect
+        self.color = color
+        self.thickness = thickness
+
+    def execute(self, scroll, canvas):
+        canvas.create_rectangle(
+            self.rect.left,
+            self.rect.top - scroll,
+            self.rect.right,
+            self.rect.bottom - scroll,
+            width=self.thickness,
+            outline=self.color,
+        )
 
 
 def paint_tree(layout_object, display_list):
@@ -689,32 +807,43 @@ def paint_tree(layout_object, display_list):
 SCROLL_STEP = 100
 
 
-class Browser:
-    def __init__(self):
-        self.window = tk.Tk()
-        self.canvas = tk.Canvas(
-            self.window,
-            width=WIDTH,
-            height=HEIGHT,
-            bg="white",
-        )
-        self.canvas.pack()
+class Tab:
+    def __init__(self, tab_height):
         self.scroll = 0
+        self.url: URL | None = None
+        self.tab_height = tab_height
+        self.history = []
 
-        # 下矢印キーに scrolldown メソッドをバインド
-        self.window.bind("<Down>", self.scrolldown)
+    def click(self, x, y):
+        assert self.url is not None
+        y += self.scroll
 
-    def draw(self):
-        self.canvas.delete("all")
+        # クリック位置で最後の要素からヒットテスト
+        objs = [obj for obj in tree_to_list(self.document, [])
+                if obj.x <= x < obj.x + obj.width and obj.y <= y < obj.y + obj.height]
+        if not objs:
+            return
+        elt = objs[-1].node
+        while elt:
+            if isinstance(elt, Text):
+                pass
+            elif elt.tag == "a" and "href" in elt.attributes:
+                url = self.url.resolve(elt.attributes["href"])
+                return self.load(url)
+            elt = elt.parent
+
+    def draw(self, canvas, offset):
         for cmd in self.display_list:
             # 見えない範囲はスキップ
-            if cmd.top > self.scroll + HEIGHT:
+            if cmd.rect.top > self.scroll + self.tab_height:
                 continue
-            if cmd.bottom < self.scroll:
+            if cmd.rect.bottom < self.scroll:
                 continue
-            cmd.execute(self.scroll, self.canvas)
+            cmd.execute(self.scroll - offset, canvas)
 
     def load(self, url):
+        self.history.append(url)
+        self.url = url
         body = url.request()
         logging.info("Received response: %d bytes", len(body))
 
@@ -751,17 +880,232 @@ class Browser:
         logging.info("Painted document: %d items in display list",
                      len(self.display_list))
 
-        self.draw()
-        logging.info("Finished drawing document")
-
-    def scrolldown(self, event):
-        max_y = max(self.document.height + 2 * VSTEP - HEIGHT, 0)
+    def scrolldown(self):
+        max_y = max(self.document.height + 2 * VSTEP - self.tab_height, 0)
         self.scroll = min(self.scroll + SCROLL_STEP, max_y)
+
+    def go_back(self):
+        if len(self.history) > 1:
+            self.history.pop()
+            back = self.history.pop()
+            self.load(back)
+
+
+class Chrome:
+    def __init__(self, browser):
+        self.browser = browser
+        self.font = get_font(20, "normal", "roman")
+        self.font_height = self.font.metrics("linespace")
+        self.padding = 5
+
+        # タブバー関連のプロパティ
+        self.tabbar_top = 0
+        self.tabbar_bottom = self.font_height + 2 * self.padding
+        plus_width = self.font.measure("+") + 2 * self.padding
+        self.newtab_rect = Rect(
+            self.padding,
+            self.padding,
+            self.padding + plus_width,
+            self.padding + self.font_height,
+        )
+
+        # URLバー関連のプロパティ
+        self.urlbar_top = self.tabbar_bottom
+        self.urlbar_bottom = self.urlbar_top + self.font_height + 2 * self.padding
+        back_width = self.font.measure("<") + 2 * self.padding
+        self.back_rect = Rect(
+            self.padding,
+            self.urlbar_top + self.padding,
+            self.padding + back_width,
+            self.urlbar_bottom - self.padding,
+        )
+        self.address_rect = Rect(
+            self.back_rect.right + self.padding,
+            self.urlbar_top + self.padding,
+            WIDTH - self.padding,
+            self.urlbar_bottom - self.padding,
+        )
+        self.focus = None
+        self.address_bar = ""
+
+        # クローム全体の高さ
+        self.bottom = self.urlbar_bottom
+
+    def tab_rect(self, i):
+        tabs_start = self.newtab_rect.right + self.padding
+        tab_width = self.font.measure("Tab X") + 2 * self.padding
+        return Rect(
+            tabs_start + tab_width * i,
+            self.tabbar_top,
+            tabs_start + tab_width * (i + 1),
+            self.tabbar_bottom,
+        )
+
+    def paint(self):
+        cmds = []
+        # クロームの背景と区切り線の描画
+        cmds.append(DrawRect(Rect(0, 0, WIDTH, self.bottom), "white"))
+        cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, "black", 1))
+
+        # タブバーの描画
+        cmds.append(DrawOutline(self.newtab_rect, "black", 1))
+        cmds.append(DrawText(
+            self.newtab_rect.left + self.padding,
+            self.newtab_rect.top,
+            "+",
+            self.font,
+            "black",
+        ))
+        for i, tab in enumerate(self.browser.tabs):
+            bounds = self.tab_rect(i)
+            cmds.append(DrawLine(bounds.left, 0, bounds.left,
+                        bounds.bottom, "black", 1))
+            cmds.append(DrawLine(bounds.right, 0, bounds.right,
+                        bounds.bottom, "black", 1))
+            cmds.append(DrawText(
+                bounds.left + self.padding,
+                bounds.top + self.padding,
+                "Tab {}".format(i + 1),
+                self.font,
+                "black",
+            ))
+
+            # アクティブなタブ用の追加描画
+            if tab == self.browser.active_tab:
+                cmds.append(DrawLine(0, bounds.bottom, bounds.left,
+                            bounds.bottom, "black", 1))
+                cmds.append(DrawLine(bounds.right, bounds.bottom, WIDTH,
+                            bounds.bottom, "black", 1))
+
+        # URLバーの描画
+        cmds.append(DrawOutline(self.back_rect, "black", 1))
+        cmds.append(DrawText(
+            self.back_rect.left + self.padding,
+            self.back_rect.top,
+            "<",
+            self.font,
+            "black",
+        ))
+        cmds.append(DrawOutline(self.address_rect, "black", 1))
+        if self.focus == "address bar":
+            cmds.append(DrawText(
+                self.address_rect.left + self.padding,
+                self.address_rect.top,
+                self.address_bar,
+                self.font,
+                "black",
+            ))
+            w = self.font.measure(self.address_bar)
+            cmds.append(DrawLine(
+                self.address_rect.left + self.padding + w,
+                self.address_rect.top,
+                self.address_rect.left + self.padding + w,
+                self.address_rect.bottom,
+                "red",
+                1,
+            ))
+        else:
+            url = str(
+                self.browser.active_tab.url) if self.browser.active_tab and self.browser.active_tab.url else ""
+            cmds.append(DrawText(
+                self.address_rect.left + self.padding,
+                self.address_rect.top,
+                url,
+                self.font,
+                "black",
+            ))
+
+        return cmds
+
+    def click(self, x, y):
+        self.focus = None
+        if self.newtab_rect.containsPoint(x, y):
+            self.browser.new_tab(URL("https://browser.engineering/"))
+        elif self.back_rect.containsPoint(x, y):
+            self.browser.active_tab.go_back()
+        elif self.address_rect.containsPoint(x, y):
+            self.focus = "address bar"
+            self.address_bar = ""
+        else:
+            for i, tab in enumerate(self.browser.tabs):
+                if self.tab_rect(i).containsPoint(x, y):
+                    self.browser.active_tab = tab
+                    break
+
+    def keypress(self, char):
+        if self.focus == "address bar":
+            self.address_bar += char
+
+    def enter(self):
+        if self.focus == "address bar":
+            self.browser.active_tab.load(URL(self.address_bar))
+            self.focus = None
+
+
+class Browser:
+    def __init__(self):
+        self.tabs = []
+        self.active_tab: Tab | None = None
+        self.window = tk.Tk()
+        self.canvas = tk.Canvas(
+            self.window,
+            width=WIDTH,
+            height=HEIGHT,
+            bg="white",
+        )
+        self.canvas.pack()
+
+        # 下矢印キーに scrolldown メソッドをバインド
+        self.window.bind("<Down>", self.handle_down)
+        self.window.bind("<Button-1>", self.handle_click)
+        self.window.bind("<Key>", self.handle_key)
+        self.window.bind("<Return>", self.handle_enter)
+
+        self.chrome = Chrome(self)
+
+    def handle_down(self, e):
+        assert self.active_tab is not None
+        self.active_tab.scrolldown()
+        self.draw()
+
+    def handle_click(self, e):
+        assert self.active_tab is not None
+        if e.y < self.chrome.bottom:
+            self.chrome.click(e.x, e.y)
+        else:
+            tab_y = e.y - self.chrome.bottom
+            self.active_tab.click(e.x, tab_y)
+        self.draw()
+
+    def draw(self):
+        assert self.active_tab is not None
+        self.canvas.delete("all")
+        self.active_tab.draw(self.canvas, self.chrome.bottom)
+        for cmd in self.chrome.paint():
+            cmd.execute(0, self.canvas)
+
+    def new_tab(self, url):
+        new_tab = Tab(HEIGHT - self.chrome.bottom)
+        new_tab.load(url)
+        self.active_tab = new_tab
+        self.tabs.append(new_tab)
+        self.draw()
+
+    def handle_key(self, e):
+        if len(e.char) == 0:
+            return
+        if not (0x20 <= ord(e.char) <= 0x7E):
+            return
+        self.chrome.keypress(e.char)
+        self.draw()
+
+    def handle_enter(self, e):
+        self.chrome.enter()
         self.draw()
 
 
 if __name__ == "__main__":
     import sys
 
-    Browser().load(URL(sys.argv[1]))
+    Browser().new_tab(URL(sys.argv[1]))
     tk.mainloop()
