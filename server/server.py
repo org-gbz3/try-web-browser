@@ -1,3 +1,4 @@
+import html
 import random
 import socket
 import urllib.parse
@@ -16,11 +17,12 @@ LOGINS = {
 def show_comments(session):
     out = "<!DOCTYPE html>"
     for entry, who in ENTRIES:
-        out += "<p>{}\n<i>by {}</i></p>".format(entry, who)
+        out += "<p>{}\n<i>by {}</i></p>".format(
+            html.escape(entry), html.escape(who))
     if "user" in session:
         nonce = str(random.random())[2:]
         session["nonce"] = nonce
-        out += "<h1>Hello, " + session["user"] + "</h1>"
+        out += "<h1>Hello, " + html.escape(session["user"]) + "</h1>"
         out += "<form action=/add method=post>"
         out += "<input type=hidden name=nonce value={}>".format(nonce)
         out += "<p><input name=guest></p>"
