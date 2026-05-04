@@ -1010,6 +1010,9 @@ class JSContext:
 
     def XMLHttpRequest_send(self, method, url, body):
         full_url = self.tab.url.resolve(url)
+        if not self.tab.allowed_request(full_url):
+            raise Exception(
+                "Cross-origin XHR blocked by CSP: {}".format(full_url))
         headers, out = full_url.request(self.tab.url, body)
         if full_url.origin() != self.tab.url.origin():
             raise Exception("Cross-origin XHR request not allowed")
@@ -1099,6 +1102,14 @@ class Tab:
         self.nodes = HTMLParser(body).parse()
         logging.info("Parsed HTML: %s", repr(self.nodes))
 
+        self.allowed_origins = None
+        if "content-security-policy" in headers:
+            csp = headers["content-security-policy"].split()
+            if len(csp) > 0 and csp[0] == "default-src":
+                self.allowed_origins = []
+                for origin in csp[1:]:
+                    self.allowed_origins.append(URL(origin).origin())
+
         # render() が self.rules を参照するため、先に初期化しておく
         # JS 実行時に innerHTML_set() によって CSSルール適用前に render() が呼ばれる可能性があるため。
         self.rules = DEFAULT_STYLE_SHEET.copy()
@@ -1110,14 +1121,17 @@ class Tab:
         self.js = JSContext(self)
         for script in scripts:
             script_url = url.resolve(script)
+            script_url_s = script_url.data_url if script_url.scheme == "data" else str(
+                script_url)
+            if not self.allowed_request(script_url):
+                logging.warning("Blocked script due to CSP: %s", script_url_s)
+                continue
             try:
                 header, body = script_url.request(url)
             except Exception:
-                logging.warning("Failed to load script: %s",
-                                script_url.data_url if script_url.scheme == "data" else str(script_url))
+                logging.warning("Failed to load script: %s", script_url_s)
                 continue
-            logging.info("Loaded script: %s",
-                         script_url.data_url if script_url.scheme == "data" else str(script_url))
+            logging.info("Loaded script: %s", script_url_s)
             print("Script returned: ", self.js.run(script, body))
 
         # CSSルールを読み込む
@@ -1127,15 +1141,15 @@ class Tab:
                  and node.attributes.get("rel") == "stylesheet" and "href" in node.attributes]
         for link in links:
             style_url = url.resolve(link)
+            style_url_s = style_url.data_url if style_url.scheme == "data" else str(
+                style_url)
             try:
                 header, body = style_url.request(url)
             except Exception:
-                logging.warning("Failed to load stylesheet: %s",
-                                style_url.data_url if style_url.scheme == "data" else str(style_url))
+                logging.warning("Failed to load stylesheet: %s", style_url_s)
                 continue
             self.rules.extend(CSSParser(body).parse())
-            logging.info("Loaded stylesheet: %s",
-                         style_url.data_url if style_url.scheme == "data" else str(style_url))
+            logging.info("Loaded stylesheet: %s", style_url_s)
         self.render()
 
     def render(self):
@@ -1162,6 +1176,9 @@ class Tab:
                 return
             self.focus.attributes["value"] += char
             self.render()
+
+    def allowed_request(self, url):
+        return self.allowed_origins is None or url.origin() in self.allowed_origins
 
 
 class Chrome:
