@@ -2,18 +2,29 @@ import random
 import socket
 import urllib.parse
 
-ENTRIES = ['Pavel was here']
+ENTRIES = [
+    ("No names. We are nameless!", "cerialkiller"),
+    ("HACK THE PLANET!!!", "crashoverride"),
+]
 SESSIONS = {}
+LOGINS = {
+    "crashoverride": "0cool",
+    "cerealkiller": "emmanuel",
+}
 
 
 def show_comments(session):
     out = "<!DOCTYPE html>"
-    for entry in ENTRIES:
-        out += "<p>{}</p>".format(entry)
-    out += "<form action=add method=post>"
-    out += "<p><input name=guest></p>"
-    out += "<p><button>sign the book!</button></p>"
-    out += "</form>"
+    for entry, who in ENTRIES:
+        out += "<p>{}\n<i>by {}</i></p>".format(entry, who)
+    if "user" in session:
+        out += "<h1>Hello, " + session["user"] + "</h1>"
+        out += "<form action=/add method=post>"
+        out += "<p><input name=guest></p>"
+        out += "<p><button>Sign the book!</button></p>"
+        out += "</form>"
+    else:
+        out += "<a href=/login>Sign in to write in the guest book/a>"
     return out
 
 
@@ -28,14 +39,38 @@ def form_decode(body):
 
 
 def add_entry(session, params):
-    if 'guest' in params:
-        ENTRIES.append(params['guest'])
+    if "user" not in session:
+        return
+    if 'guest' in params and len(params['guest']) <= 100:
+        ENTRIES.append((params['guest'], session['user']))
     return show_comments(session)
 
 
 def not_found(url, method):
     out = "<!DOCTYPE html><p>Not found: {} {}".format(method, url)
     return out
+
+
+def login_form(session):
+    out = "<!DOCTYPE html>"
+    out += "<form action=/ method=post>"
+    out += "<p>Username: <input name=username></p>"
+    out += "<p>Password: <input name=password type=password></p>"
+    out += "<p><button>Log in</button></p>"
+    out += "</form>"
+    return out
+
+
+def do_login(session, params):
+    username = params.get("username")
+    password = params.get("password")
+    if username in LOGINS and LOGINS[username] == password:
+        session["user"] = username
+        return "200 OK", show_comments(session)
+    else:
+        out = "<!DOCTYPE html><h1>Invalid password for {}</h1>".format(
+            username)
+        return "401 Unauthorized", out
 
 
 def do_request(session, method, url, headers, body) -> tuple[str, str]:
@@ -45,6 +80,11 @@ def do_request(session, method, url, headers, body) -> tuple[str, str]:
         params = form_decode(body)
         add_entry(session, params)
         return "200 OK", show_comments(session)
+    elif method == "GET" and url == "/login":
+        return "200 OK", login_form(session)
+    elif method == "POST" and url == "/":
+        params = form_decode(body)
+        return do_login(session, params)
     else:
         return "404 Not Found", not_found(url, method)
 

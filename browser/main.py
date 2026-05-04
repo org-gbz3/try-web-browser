@@ -723,6 +723,10 @@ class LineLayout:
         for word in self.children:
             word.layout()
 
+        if not self.children:
+            self.height = 0
+            return
+
         # 行内の最大アセントを計算（レディングを考慮）
         max_ascent = max([word.font.metrics("ascent")
                          for word in self.children])
