@@ -925,8 +925,11 @@ class JSContext:
         self.interp.export_function("log", print)
         self.interp.evaljs(RUNTIME_JS)
 
-    def run(self, code):
-        return self.interp.evaljs(code)
+    def run(self, script, code):
+        try:
+            return self.interp.evaljs(code)
+        except dukpy.JSRuntimeError as e:
+            print("JavaScript error in {}: {}".format(script, e))
 
 
 SCROLL_STEP = 100
@@ -1020,7 +1023,7 @@ class Tab:
                     continue
                 logging.info("Loaded script: %s",
                              script_url.data_url if script_url.scheme == "data" else str(script_url))
-                print("Script returned: ", self.js.run(body))
+                print("Script returned: ", self.js.run(script, body))
 
         # CSSルールを読み込む
         self.rules = DEFAULT_STYLE_SHEET.copy()
