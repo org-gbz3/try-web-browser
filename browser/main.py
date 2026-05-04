@@ -989,6 +989,11 @@ class JSContext:
             print("Error while rendering after innerHTML change: {}".format(e))
             raise e
 
+    def XMLHttpRequest_send(self, method, url, body):
+        full_url = self.tab.url.resolve(url)
+        headers, out = full_url.request(body)
+        return out
+
 
 SCROLL_STEP = 100
 
