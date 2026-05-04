@@ -23,6 +23,8 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
+COOKIE_JAR = {}
+
 
 class URL:
     def __init__(self, url: str):
@@ -50,7 +52,7 @@ class URL:
             self.host, port = self.host.split(":", 1)
             self.port = int(port)
 
-    def request(self, payload=None):
+    def request(self, referrer, payload=None):
         if self.scheme == "data":
             return self._decode_data_url()
 
@@ -74,6 +76,14 @@ class URL:
         request += "Host: {}\r\n".format(self.host)
         request += "Connection: close\r\n"
         request += "User-Agent: Cheap-Browser/0.1.5\r\n"
+        if self.host in COOKIE_JAR:
+            cookie, params = COOKIE_JAR[self.host]
+            allow_cookie = True
+            if referrer and params.get("samesite", "none") == "lax":
+                if method != "GET":
+                    allow_cookie = self.host == referrer.host
+            if allow_cookie:
+                request += "Cookie: {}\r\n".format(cookie)
         if payload:
             length = len(payload.encode("utf8"))
             request += "Content-Length: {}\r\n".format(length)
@@ -100,10 +110,23 @@ class URL:
         # assert "transfer-encoding" not in response_headers
         assert "content-encoding" not in response_headers
 
+        if "set-cookie" in response_headers:
+            cookie = response_headers["set-cookie"]
+            params = {}
+            if ";" in cookie:
+                cookie, rest = cookie.split(";", 1)
+                for param in rest.split(";"):
+                    if "=" in param:
+                        key, value = param.split("=", 1)
+                    else:
+                        value = "true"
+                    params[key.strip().casefold()] = value.casefold()
+            COOKIE_JAR[self.host] = (cookie, params)
+
         content = response.read()
         s.close()
 
-        return content
+        return response_headers, content
 
     def _decode_data_url(self):
         payload = self.data_url[len("data:"):]
@@ -156,6 +179,9 @@ class URL:
         if self.scheme == "http" and self.port == 80:
             port_part = ""
         return "{}://{}{}{}".format(self.scheme, self.host, port_part, self.path)
+
+    def origin(self):
+        return "{}://{}:{}".format(self.scheme, self.host, self.port)
 
 
 class Text:
@@ -723,6 +749,10 @@ class LineLayout:
         for word in self.children:
             word.layout()
 
+        if not self.children:
+            self.height = 0
+            return
+
         # 行内の最大アセントを計算（レディングを考慮）
         max_ascent = max([word.font.metrics("ascent")
                          for word in self.children])
@@ -978,6 +1008,16 @@ class JSContext:
             print("Error while rendering after innerHTML change: {}".format(e))
             raise e
 
+    def XMLHttpRequest_send(self, method, url, body):
+        full_url = self.tab.url.resolve(url)
+        if not self.tab.allowed_request(full_url):
+            raise Exception(
+                "Cross-origin XHR blocked by CSP: {}".format(full_url))
+        headers, out = full_url.request(self.tab.url, body)
+        if full_url.origin() != self.tab.url.origin():
+            raise Exception("Cross-origin XHR request not allowed")
+        return out
+
 
 SCROLL_STEP = 100
 
@@ -1054,13 +1094,21 @@ class Tab:
             cmd.execute(self.scroll - offset, canvas)
 
     def load(self, url, payload=None):
+        headers, body = url.request(self.url, payload)
         self.history.append(url)
         self.url = url
-        body = url.request(payload)
         logging.info("Received response: %d bytes", len(body))
 
         self.nodes = HTMLParser(body).parse()
         logging.info("Parsed HTML: %s", repr(self.nodes))
+
+        self.allowed_origins = None
+        if "content-security-policy" in headers:
+            csp = headers["content-security-policy"].split()
+            if len(csp) > 0 and csp[0] == "default-src":
+                self.allowed_origins = []
+                for origin in csp[1:]:
+                    self.allowed_origins.append(URL(origin).origin())
 
         # render() が self.rules を参照するため、先に初期化しておく
         # JS 実行時に innerHTML_set() によって CSSルール適用前に render() が呼ばれる可能性があるため。
@@ -1070,19 +1118,21 @@ class Tab:
         scripts = [node.attributes["src"]
                    for node in tree_to_list(self.nodes, [])
                    if isinstance(node, Element) and node.tag == "script" and "src" in node.attributes]
-        if len(scripts) > 0:
-            self.js = JSContext(self)
-            for script in scripts:
-                script_url = url.resolve(script)
-                try:
-                    body = script_url.request()
-                except Exception:
-                    logging.warning("Failed to load script: %s",
-                                    script_url.data_url if script_url.scheme == "data" else str(script_url))
-                    continue
-                logging.info("Loaded script: %s",
-                             script_url.data_url if script_url.scheme == "data" else str(script_url))
-                print("Script returned: ", self.js.run(script, body))
+        self.js = JSContext(self)
+        for script in scripts:
+            script_url = url.resolve(script)
+            script_url_s = script_url.data_url if script_url.scheme == "data" else str(
+                script_url)
+            if not self.allowed_request(script_url):
+                logging.warning("Blocked script due to CSP: %s", script_url_s)
+                continue
+            try:
+                header, body = script_url.request(url)
+            except Exception:
+                logging.warning("Failed to load script: %s", script_url_s)
+                continue
+            logging.info("Loaded script: %s", script_url_s)
+            print("Script returned: ", self.js.run(script, body))
 
         # CSSルールを読み込む
         links = [node.attributes["href"]
@@ -1091,15 +1141,15 @@ class Tab:
                  and node.attributes.get("rel") == "stylesheet" and "href" in node.attributes]
         for link in links:
             style_url = url.resolve(link)
+            style_url_s = style_url.data_url if style_url.scheme == "data" else str(
+                style_url)
             try:
-                body = style_url.request()
+                header, body = style_url.request(url)
             except Exception:
-                logging.warning("Failed to load stylesheet: %s",
-                                style_url.data_url if style_url.scheme == "data" else str(style_url))
+                logging.warning("Failed to load stylesheet: %s", style_url_s)
                 continue
             self.rules.extend(CSSParser(body).parse())
-            logging.info("Loaded stylesheet: %s",
-                         style_url.data_url if style_url.scheme == "data" else str(style_url))
+            logging.info("Loaded stylesheet: %s", style_url_s)
         self.render()
 
     def render(self):
@@ -1126,6 +1176,9 @@ class Tab:
                 return
             self.focus.attributes["value"] += char
             self.render()
+
+    def allowed_request(self, url):
+        return self.allowed_origins is None or url.origin() in self.allowed_origins
 
 
 class Chrome:
