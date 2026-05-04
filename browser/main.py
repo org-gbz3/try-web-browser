@@ -926,6 +926,7 @@ class JSContext:
         self.interp.export_function("log", print)
         self.interp.evaljs(RUNTIME_JS)
         self.interp.export_function("querySelectorAll", self.querySelectorAll)
+        self.interp.export_function("getAttribute", self.getAttribute)
         self.node_to_handle = {}
         self.handle_to_node = {}
 
@@ -947,6 +948,11 @@ class JSContext:
             self.node_to_handle[elt] = handle
             self.handle_to_node[handle] = elt
         return self.node_to_handle[elt]
+
+    def getAttribute(self, handle, name):
+        elt = self.handle_to_node[handle]
+        attr = elt.attributes.get(name, None)
+        return attr if attr else ""
 
 
 SCROLL_STEP = 100

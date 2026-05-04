@@ -8,3 +8,7 @@ document = {
         return handles.map(function (handle) { return new Node(handle); });
     }
 }
+
+Node.prototype.getAttribute = function (name) {
+    return call_python("getAttribute", this.handle, name);
+}
