@@ -916,6 +916,7 @@ def paint_tree(layout_object, display_list):
         paint_tree(child, display_list)
 
 
+EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(dukpy.type);"
 RUNTIME_JS = open("browser/runtime.js").read()
 
 
@@ -954,6 +955,10 @@ class JSContext:
         attr = elt.attributes.get(name, None)
         return attr if attr else ""
 
+    def dispatch_event(self, type, elt):
+        handle = self.node_to_handle.get(elt, None)
+        self.interp.evaljs(EVENT_DISPATCH_JS, type=type, handle=handle)
+
 
 SCROLL_STEP = 100
 
@@ -981,9 +986,11 @@ class Tab:
             if isinstance(elt, Text):
                 pass
             elif elt.tag == "a" and "href" in elt.attributes:
+                self.js.dispatch_event("click", elt)
                 url = self.url.resolve(elt.attributes["href"])
                 return self.load(url)
             elif elt.tag == "input":
+                self.js.dispatch_event("click", elt)
                 elt.attributes["value"] = ""
                 if self.focus:
                     self.focus.is_focused = False
@@ -991,6 +998,7 @@ class Tab:
                 elt.is_focused = True
                 return self.render()
             elif elt.tag == "button":
+                self.js.dispatch_event("click", elt)
                 while elt:
                     if elt.tag == "form" and "action" in elt.attributes:
                         return self.submit_form(elt)
@@ -999,6 +1007,7 @@ class Tab:
 
     def submit_form(self, elt):
         assert self.url is not None
+        self.js.dispatch_event("submit", elt)
         inputs = [node for node in tree_to_list(elt, [])
                   if isinstance(node, Element) and node.tag == "input" and "name" in node.attributes]
         body = ""
@@ -1087,6 +1096,7 @@ class Tab:
 
     def keypress(self, char):
         if self.focus:
+            self.js.dispatch_event("keydown", self.focus)
             self.focus.attributes["value"] += char
             self.render()
 

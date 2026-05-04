@@ -1,8 +1,14 @@
 console.log("Hi from JS!")
 
+function lengthCheck() {
+    var name = this.getAttribute("name");
+    var value = this.getAttribute("value");
+    if (value.length > 5) {
+        console.log("Input " + name + " is too long!");
+    }
+}
+
 inputs = document.querySelectorAll("input")
 for (var i = 0; i < inputs.length; i++) {
-    var name = inputs[i].getAttribute("name");
-    var value = inputs[i].getAttribute("value");
-    console.log("Input: " + name + " = " + value);
+    inputs[i].addEventListener("keydown", lengthCheck);
 }
