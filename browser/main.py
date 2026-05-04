@@ -52,7 +52,7 @@ class URL:
             self.host, port = self.host.split(":", 1)
             self.port = int(port)
 
-    def request(self, payload=None):
+    def request(self, referrer, payload=None):
         if self.scheme == "data":
             return self._decode_data_url()
 
@@ -77,7 +77,13 @@ class URL:
         request += "Connection: close\r\n"
         request += "User-Agent: Cheap-Browser/0.1.5\r\n"
         if self.host in COOKIE_JAR:
-            request += "Cookie: {}\r\n".format(COOKIE_JAR[self.host])
+            cookie, params = COOKIE_JAR[self.host]
+            allow_cookie = True
+            if referrer and params.get("samesite", "none") == "lax":
+                if method != "GET":
+                    allow_cookie = self.host == referrer.host
+            if allow_cookie:
+                request += "Cookie: {}\r\n".format(cookie)
         if payload:
             length = len(payload.encode("utf8"))
             request += "Content-Length: {}\r\n".format(length)
@@ -105,12 +111,22 @@ class URL:
         assert "content-encoding" not in response_headers
 
         if "set-cookie" in response_headers:
-            COOKIE_JAR[self.host] = response_headers["set-cookie"]
+            cookie = response_headers["set-cookie"]
+            params = {}
+            if ";" in cookie:
+                cookie, rest = cookie.split(";", 1)
+                for param in rest.split(";"):
+                    if "=" in param:
+                        key, value = param.split("=", 1)
+                    else:
+                        value = "true"
+                    params[key.strip().casefold()] = value.casefold()
+            COOKIE_JAR[self.host] = (cookie, params)
 
         content = response.read()
         s.close()
 
-        return content
+        return response_headers, content
 
     def _decode_data_url(self):
         payload = self.data_url[len("data:"):]
@@ -994,7 +1010,7 @@ class JSContext:
 
     def XMLHttpRequest_send(self, method, url, body):
         full_url = self.tab.url.resolve(url)
-        headers, out = full_url.request(body)
+        headers, out = full_url.request(self.tab.url, body)
         if full_url.origin() != self.tab.url.origin():
             raise Exception("Cross-origin XHR request not allowed")
         return out
@@ -1075,9 +1091,9 @@ class Tab:
             cmd.execute(self.scroll - offset, canvas)
 
     def load(self, url, payload=None):
+        headers, body = url.request(self.url, payload)
         self.history.append(url)
         self.url = url
-        body = url.request(payload)
         logging.info("Received response: %d bytes", len(body))
 
         self.nodes = HTMLParser(body).parse()
@@ -1095,7 +1111,7 @@ class Tab:
         for script in scripts:
             script_url = url.resolve(script)
             try:
-                body = script_url.request()
+                header, body = script_url.request(url)
             except Exception:
                 logging.warning("Failed to load script: %s",
                                 script_url.data_url if script_url.scheme == "data" else str(script_url))
@@ -1112,7 +1128,7 @@ class Tab:
         for link in links:
             style_url = url.resolve(link)
             try:
-                body = style_url.request()
+                header, body = style_url.request(url)
             except Exception:
                 logging.warning("Failed to load stylesheet: %s",
                                 style_url.data_url if style_url.scheme == "data" else str(style_url))
