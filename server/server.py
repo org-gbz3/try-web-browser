@@ -1,10 +1,12 @@
+import random
 import socket
 import urllib.parse
 
 ENTRIES = ['Pavel was here']
+SESSIONS = {}
 
 
-def show_comments():
+def show_comments(session):
     out = "<!DOCTYPE html>"
     for entry in ENTRIES:
         out += "<p>{}</p>".format(entry)
@@ -25,10 +27,10 @@ def form_decode(body):
     return params
 
 
-def add_entry(params):
+def add_entry(session, params):
     if 'guest' in params:
         ENTRIES.append(params['guest'])
-    return show_comments()
+    return show_comments(session)
 
 
 def not_found(url, method):
@@ -36,12 +38,13 @@ def not_found(url, method):
     return out
 
 
-def do_request(method, url, headers, body) -> tuple[str, str]:
+def do_request(session, method, url, headers, body) -> tuple[str, str]:
     if method == "GET" and url == "/":
-        return "200 OK", show_comments()
+        return "200 OK", show_comments(session)
     elif method == "POST" and url == "/add":
         params = form_decode(body)
-        return "200 OK", add_entry(params)
+        add_entry(session, params)
+        return "200 OK", show_comments(session)
     else:
         return "404 Not Found", not_found(url, method)
 
@@ -63,9 +66,16 @@ def handle_connection(conx):
         body = req.read(length).decode("utf8")
     else:
         body = None
-    status, body = do_request(method, url, headers, body)
+    if "cookie" in headers:
+        token = headers["cookie"][len("token="):]
+    else:
+        token = str(random.random())[2:]
+    session = SESSIONS.setdefault(token, {})
+    status, body = do_request(session, method, url, headers, body)
     response = "HTTP/1.0 {}\r\n".format(status)
     response += "Content-Length: {}\r\n".format(len(body.encode("utf8")))
+    if 'cookie' not in headers:
+        response += "Set-Cookie: token={}\r\n".format(token)
     response += "\r\n" + body
     conx.send(response.encode("utf8"))
     conx.close()
