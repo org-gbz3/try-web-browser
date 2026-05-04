@@ -24,7 +24,7 @@ def show_comments(session):
         out += "<p><button>Sign the book!</button></p>"
         out += "</form>"
     else:
-        out += "<a href=/login>Sign in to write in the guest book/a>"
+        out += "<a href=/login>Sign in to write in the guest book</a>"
     return out
 
 

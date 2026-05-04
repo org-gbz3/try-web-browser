@@ -23,6 +23,8 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
+COOKIE_JAR = {}
+
 
 class URL:
     def __init__(self, url: str):
@@ -74,6 +76,8 @@ class URL:
         request += "Host: {}\r\n".format(self.host)
         request += "Connection: close\r\n"
         request += "User-Agent: Cheap-Browser/0.1.5\r\n"
+        if self.host in COOKIE_JAR:
+            request += "Cookie: {}\r\n".format(COOKIE_JAR[self.host])
         if payload:
             length = len(payload.encode("utf8"))
             request += "Content-Length: {}\r\n".format(length)
@@ -99,6 +103,9 @@ class URL:
 
         # assert "transfer-encoding" not in response_headers
         assert "content-encoding" not in response_headers
+
+        if "set-cookie" in response_headers:
+            COOKIE_JAR[self.host] = response_headers["set-cookie"]
 
         content = response.read()
         s.close()
@@ -1074,19 +1081,18 @@ class Tab:
         scripts = [node.attributes["src"]
                    for node in tree_to_list(self.nodes, [])
                    if isinstance(node, Element) and node.tag == "script" and "src" in node.attributes]
-        if len(scripts) > 0:
-            self.js = JSContext(self)
-            for script in scripts:
-                script_url = url.resolve(script)
-                try:
-                    body = script_url.request()
-                except Exception:
-                    logging.warning("Failed to load script: %s",
-                                    script_url.data_url if script_url.scheme == "data" else str(script_url))
-                    continue
-                logging.info("Loaded script: %s",
-                             script_url.data_url if script_url.scheme == "data" else str(script_url))
-                print("Script returned: ", self.js.run(script, body))
+        self.js = JSContext(self)
+        for script in scripts:
+            script_url = url.resolve(script)
+            try:
+                body = script_url.request()
+            except Exception:
+                logging.warning("Failed to load script: %s",
+                                script_url.data_url if script_url.scheme == "data" else str(script_url))
+                continue
+            logging.info("Loaded script: %s",
+                         script_url.data_url if script_url.scheme == "data" else str(script_url))
+            print("Script returned: ", self.js.run(script, body))
 
         # CSSルールを読み込む
         links = [node.attributes["href"]
