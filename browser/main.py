@@ -8,6 +8,8 @@ from datetime import datetime
 from urllib.parse import quote, unquote_to_bytes
 from zoneinfo import ZoneInfo
 
+import dukpy
+
 
 # JST タイムゾーンの設定
 def jst_converter(*args):
@@ -146,7 +148,7 @@ class URL:
             return URL("{}://{}:{}{}".format(self.scheme, self.host, self.port, url))
 
     def __str__(self) -> str:
-        if self.data_url:
+        if self.scheme == "data":
             return self.data_url
         port_part = ":" + str(self.port)
         if self.scheme == "https" and self.port == 443:
@@ -914,6 +916,69 @@ def paint_tree(layout_object, display_list):
         paint_tree(child, display_list)
 
 
+EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type));"
+RUNTIME_JS = open("browser/runtime.js").read()
+
+
+class JSContext:
+    def __init__(self, tab):
+        self.tab = tab
+        self.interp = dukpy.JSInterpreter()
+        self.interp.export_function("log", print)
+        self.interp.evaljs(RUNTIME_JS)
+        self.interp.export_function("querySelectorAll", self.querySelectorAll)
+        self.interp.export_function("getAttribute", self.getAttribute)
+        self.interp.export_function("innerHTML_set", self.innerHTML_set)
+        self.node_to_handle = {}
+        self.handle_to_node = {}
+
+    def run(self, script, code):
+        try:
+            return self.interp.evaljs(code)
+        except dukpy.JSRuntimeError as e:
+            print("JavaScript error in {}: {}".format(script, e))
+
+    def querySelectorAll(self, selector_text):
+        selector = CSSParser(selector_text).selector()
+        nodes = [node for node in tree_to_list(
+            self.tab.nodes, []) if selector.matches(node)]
+        return [self.get_handle(node) for node in nodes]
+
+    def get_handle(self, elt):
+        if elt not in self.node_to_handle:
+            handle = len(self.node_to_handle) + 1
+            self.node_to_handle[elt] = handle
+            self.handle_to_node[handle] = elt
+        return self.node_to_handle[elt]
+
+    def getAttribute(self, handle, name):
+        elt = self.handle_to_node[handle]
+        attr = elt.attributes.get(name, None)
+        return attr if attr else ""
+
+    def dispatch_event(self, type, elt):
+        handle = self.node_to_handle.get(elt, None)
+        do_default = self.interp.evaljs(
+            EVENT_DISPATCH_JS, type=type, handle=handle)
+        return not do_default
+
+    def innerHTML_set(self, handle, html):
+        doc = HTMLParser("<html><body>" + html + "</body></html>").parse()
+        new_nodes = doc.children[0].children
+        elt = self.handle_to_node[handle]
+        elt.children = new_nodes
+        for child in elt.children:
+            child.parent = elt
+
+        try:
+            self.tab.render()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print("Error while rendering after innerHTML change: {}".format(e))
+            raise e
+
+
 SCROLL_STEP = 100
 
 
@@ -940,9 +1005,13 @@ class Tab:
             if isinstance(elt, Text):
                 pass
             elif elt.tag == "a" and "href" in elt.attributes:
+                if self.js.dispatch_event("click", elt):
+                    return
                 url = self.url.resolve(elt.attributes["href"])
                 return self.load(url)
             elif elt.tag == "input":
+                if self.js.dispatch_event("click", elt):
+                    return
                 elt.attributes["value"] = ""
                 if self.focus:
                     self.focus.is_focused = False
@@ -950,6 +1019,8 @@ class Tab:
                 elt.is_focused = True
                 return self.render()
             elif elt.tag == "button":
+                if self.js.dispatch_event("click", elt):
+                    return
                 while elt:
                     if elt.tag == "form" and "action" in elt.attributes:
                         return self.submit_form(elt)
@@ -958,6 +1029,8 @@ class Tab:
 
     def submit_form(self, elt):
         assert self.url is not None
+        if self.js.dispatch_event("submit", elt):
+            return
         inputs = [node for node in tree_to_list(elt, [])
                   if isinstance(node, Element) and node.tag == "input" and "name" in node.attributes]
         body = ""
@@ -989,7 +1062,29 @@ class Tab:
         self.nodes = HTMLParser(body).parse()
         logging.info("Parsed HTML: %s", repr(self.nodes))
 
+        # render() が self.rules を参照するため、先に初期化しておく
+        # JS 実行時に innerHTML_set() によって CSSルール適用前に render() が呼ばれる可能性があるため。
         self.rules = DEFAULT_STYLE_SHEET.copy()
+
+        # JSを取得し実行する
+        scripts = [node.attributes["src"]
+                   for node in tree_to_list(self.nodes, [])
+                   if isinstance(node, Element) and node.tag == "script" and "src" in node.attributes]
+        if len(scripts) > 0:
+            self.js = JSContext(self)
+            for script in scripts:
+                script_url = url.resolve(script)
+                try:
+                    body = script_url.request()
+                except Exception:
+                    logging.warning("Failed to load script: %s",
+                                    script_url.data_url if script_url.scheme == "data" else str(script_url))
+                    continue
+                logging.info("Loaded script: %s",
+                             script_url.data_url if script_url.scheme == "data" else str(script_url))
+                print("Script returned: ", self.js.run(script, body))
+
+        # CSSルールを読み込む
         links = [node.attributes["href"]
                  for node in tree_to_list(self.nodes, [])
                  if isinstance(node, Element) and node.tag == "link"
@@ -1027,6 +1122,8 @@ class Tab:
 
     def keypress(self, char):
         if self.focus:
+            if self.js.dispatch_event("keydown", self.focus):
+                return
             self.focus.attributes["value"] += char
             self.render()
 
@@ -1240,6 +1337,7 @@ class Browser:
         self.draw()
 
     def handle_key(self, e):
+        assert self.active_tab is not None
         if len(e.char) == 0:
             return
         if not (0x20 <= ord(e.char) <= 0x7E):
