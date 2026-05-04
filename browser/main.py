@@ -916,6 +916,19 @@ def paint_tree(layout_object, display_list):
         paint_tree(child, display_list)
 
 
+RUNTIME_JS = open("browser/runtime.js").read()
+
+
+class JSContext:
+    def __init__(self):
+        self.interp = dukpy.JSInterpreter()
+        self.interp.export_function("log", print)
+        self.interp.evaljs(RUNTIME_JS)
+
+    def run(self, code):
+        return self.interp.evaljs(code)
+
+
 SCROLL_STEP = 100
 
 
@@ -995,17 +1008,19 @@ class Tab:
         scripts = [node.attributes["src"]
                    for node in tree_to_list(self.nodes, [])
                    if isinstance(node, Element) and node.tag == "script" and "src" in node.attributes]
-        for script in scripts:
-            script_url = url.resolve(script)
-            try:
-                body = script_url.request()
-            except Exception:
-                logging.warning("Failed to load script: %s",
-                                script_url.data_url if script_url.scheme == "data" else str(script_url))
-                continue
-            logging.info("Loaded script: %s",
-                         script_url.data_url if script_url.scheme == "data" else str(script_url))
-            print("Script returned: ", dukpy.evaljs(body))
+        if len(scripts) > 0:
+            self.js = JSContext()
+            for script in scripts:
+                script_url = url.resolve(script)
+                try:
+                    body = script_url.request()
+                except Exception:
+                    logging.warning("Failed to load script: %s",
+                                    script_url.data_url if script_url.scheme == "data" else str(script_url))
+                    continue
+                logging.info("Loaded script: %s",
+                             script_url.data_url if script_url.scheme == "data" else str(script_url))
+                print("Script returned: ", self.js.run(body))
 
         # CSSルールを読み込む
         self.rules = DEFAULT_STYLE_SHEET.copy()
