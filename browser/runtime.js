@@ -30,3 +30,9 @@ Node.prototype.dispatchEvent = function (type) {
         list[i].call(this);
     }
 }
+
+Object.defineProperty(Node.prototype, "innerHTML", {
+    set: function (html) {
+        call_python("innerHTML_set", this.handle, html.toString());
+    }
+});

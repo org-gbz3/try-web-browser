@@ -12,3 +12,8 @@ inputs = document.querySelectorAll("input")
 for (var i = 0; i < inputs.length; i++) {
     inputs[i].addEventListener("keydown", lengthCheck);
 }
+
+ps = document.querySelectorAll("p")
+for (var i = 0; i < ps.length; i++) {
+    ps[i].innerHTML = " This is my <b>new</b> bit of content!";
+}

@@ -928,6 +928,7 @@ class JSContext:
         self.interp.evaljs(RUNTIME_JS)
         self.interp.export_function("querySelectorAll", self.querySelectorAll)
         self.interp.export_function("getAttribute", self.getAttribute)
+        self.interp.export_function("innerHTML_set", self.innerHTML_set)
         self.node_to_handle = {}
         self.handle_to_node = {}
 
@@ -958,6 +959,22 @@ class JSContext:
     def dispatch_event(self, type, elt):
         handle = self.node_to_handle.get(elt, None)
         self.interp.evaljs(EVENT_DISPATCH_JS, type=type, handle=handle)
+
+    def innerHTML_set(self, handle, html):
+        doc = HTMLParser("<html><body>" + html + "</body></html>").parse()
+        new_nodes = doc.children[0].children
+        elt = self.handle_to_node[handle]
+        elt.children = new_nodes
+        for child in elt.children:
+            child.parent = elt
+
+        try:
+            self.tab.render()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print("Error while rendering after innerHTML change: {}".format(e))
+            raise e
 
 
 SCROLL_STEP = 100
@@ -1039,6 +1056,10 @@ class Tab:
         self.nodes = HTMLParser(body).parse()
         logging.info("Parsed HTML: %s", repr(self.nodes))
 
+        # render() が self.rules を参照するため、先に初期化しておく
+        # JS 実行時に innerHTML_set() によって CSSルール適用前に render() が呼ばれる可能性があるため。
+        self.rules = DEFAULT_STYLE_SHEET.copy()
+
         # JSを取得し実行する
         scripts = [node.attributes["src"]
                    for node in tree_to_list(self.nodes, [])
@@ -1058,7 +1079,6 @@ class Tab:
                 print("Script returned: ", self.js.run(script, body))
 
         # CSSルールを読み込む
-        self.rules = DEFAULT_STYLE_SHEET.copy()
         links = [node.attributes["href"]
                  for node in tree_to_list(self.nodes, [])
                  if isinstance(node, Element) and node.tag == "link"
