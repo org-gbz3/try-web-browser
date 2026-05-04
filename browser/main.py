@@ -164,6 +164,9 @@ class URL:
             port_part = ""
         return "{}://{}{}{}".format(self.scheme, self.host, port_part, self.path)
 
+    def origin(self):
+        return "{}://{}:{}".format(self.scheme, self.host, self.port)
+
 
 class Text:
     def __init__(self, text, parent):
@@ -992,6 +995,8 @@ class JSContext:
     def XMLHttpRequest_send(self, method, url, body):
         full_url = self.tab.url.resolve(url)
         headers, out = full_url.request(body)
+        if full_url.origin() != self.tab.url.origin():
+            raise Exception("Cross-origin XHR request not allowed")
         return out
 
 
