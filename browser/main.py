@@ -920,16 +920,33 @@ RUNTIME_JS = open("browser/runtime.js").read()
 
 
 class JSContext:
-    def __init__(self):
+    def __init__(self, tab):
+        self.tab = tab
         self.interp = dukpy.JSInterpreter()
         self.interp.export_function("log", print)
         self.interp.evaljs(RUNTIME_JS)
+        self.interp.export_function("querySelectorAll", self.querySelectorAll)
+        self.node_to_handle = {}
+        self.handle_to_node = {}
 
     def run(self, script, code):
         try:
             return self.interp.evaljs(code)
         except dukpy.JSRuntimeError as e:
             print("JavaScript error in {}: {}".format(script, e))
+
+    def querySelectorAll(self, selector_text):
+        selector = CSSParser(selector_text).selector()
+        nodes = [node for node in tree_to_list(
+            self.tab.nodes, []) if selector.matches(node)]
+        return [self.get_handle(node) for node in nodes]
+
+    def get_handle(self, elt):
+        if elt not in self.node_to_handle:
+            handle = len(self.node_to_handle) + 1
+            self.node_to_handle[elt] = handle
+            self.handle_to_node[handle] = elt
+        return self.node_to_handle[elt]
 
 
 SCROLL_STEP = 100
@@ -1012,7 +1029,7 @@ class Tab:
                    for node in tree_to_list(self.nodes, [])
                    if isinstance(node, Element) and node.tag == "script" and "src" in node.attributes]
         if len(scripts) > 0:
-            self.js = JSContext()
+            self.js = JSContext(self)
             for script in scripts:
                 script_url = url.resolve(script)
                 try:
