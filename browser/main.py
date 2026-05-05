@@ -1,14 +1,16 @@
 
 import base64
+import ctypes
 import logging
+import math
 import socket
-import tkinter as tk
-import tkinter.font
 from datetime import datetime
 from urllib.parse import quote, unquote_to_bytes
 from zoneinfo import ZoneInfo
 
 import dukpy
+import sdl2
+import skia
 
 
 # JST タイムゾーンの設定
@@ -462,17 +464,73 @@ class DescendantSelector:
 FONTS = {}
 
 
-def get_font(size, weight, slant):
+def get_font(size, weight, style):
     # フォントキャッシュからフォントを取得
-    key = (size, weight, slant)
+    key = (weight, style)
     if key not in FONTS:
-        # フォントを作成
-        font = tkinter.font.Font(size=size, weight=weight, slant=slant)
-        # パフォーマンス向上のための Label オブジェクト（Tkinter の推奨）
-        label = tk.Label(font=font)
-        FONTS[key] = (font, label)
+        if weight == "bold":
+            skia_weight = skia.FontStyle.kBold_Weight
+        else:
+            skia_weight = skia.FontStyle.kNormal_Weight
+        if style == "italic":
+            skia_style = skia.FontStyle.kItalic_Slant
+        else:
+            skia_style = skia.FontStyle.kUpright_Slant
+        skia_width = skia.FontStyle.kNormal_Width
+        style_info = skia.FontStyle(skia_weight, skia_width, skia_style)
+        font = skia.Typeface('Arial', style_info)
+        FONTS[key] = font
+    return skia.Font(FONTS[key], size)
 
-    return FONTS[key][0]
+
+def linespace(font):
+    metrics = font.getMetrics()
+    return metrics.fDescent - metrics.fAscent
+
+
+NAMED_COLORS = {
+    "black": "#000000",
+    "gray": "#808080",
+    "white": "#ffffff",
+    "red": "#ff0000",
+    "green": "#00ff00",
+    "blue": "#0000ff",
+    "lightblue": "#add8e6",
+    "lightgreen": "#90ee90",
+    "orange": "#ffa500",
+    "orangered": "#ff4500",
+}
+
+
+def parse_color(color):
+    if color.startswith("#") and len(color) == 7:
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        return skia.Color(r, g, b)
+    elif color.startswith("#") and len(color) == 9:
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        a = int(color[7:9], 16)
+        return skia.Color(r, g, b, a)
+    elif color in NAMED_COLORS:
+        return parse_color(NAMED_COLORS[color])
+    else:
+        return skia.ColorGRAY  # デフォルトは灰色
+
+
+def parse_blend_mode(blend_mode_str):
+    if blend_mode_str == "multiply":
+        return skia.BlendMode.kMultiply
+    elif blend_mode_str == "difference":
+        return skia.BlendMode.kDifference
+    elif blend_mode_str == "destination-in":
+        return skia.BlendMode.kDstIn
+    elif blend_mode_str == "source-over":
+        return skia.BlendMode.kSrcOver
+    else:
+        return skia.BlendMode.kSrcOver  # デフォルトは通常の合成
 
 
 DEFAULT_STYLE_SHEET = CSSParser(open("browser/browser.css").read()).parse()
@@ -527,19 +585,6 @@ def cascade_priority(rule):
 
 WIDTH, HEIGHT = 800, 600
 HSTEP, VSTEP = 13, 18
-
-
-class Rect:
-    def __init__(self, left, top, right, bottom):
-        self.left = left
-        self.top = top
-        self.right = right
-        self.bottom = bottom
-
-    def containsPoint(self, x, y):
-        return self.left <= x < self.right and self.top <= y < self.bottom
-
-
 BLOCK_ELEMENTS = [
     "html", "body", "article", "section", "nav", "aside",
     "h1", "h2", "h3", "h4", "h5", "h6", "hgroup", "header",
@@ -577,6 +622,9 @@ class DocumentLayout:
 
     def paint(self):
         return []
+
+    def paint_effects(self, cmds):
+        return cmds
 
 
 class BlockLayout:
@@ -658,7 +706,7 @@ class BlockLayout:
         size = int(float(node.style["font-size"][:-2]) * .75)
         font = get_font(size, weight, style)
 
-        self.cursor_x += w + font.measure(" ")
+        self.cursor_x += w + font.measureText(" ")
 
     def flush(self):
         # 空行では何もしない
@@ -666,14 +714,14 @@ class BlockLayout:
             return
 
         # 行内の最大アセントを計算（レディングを考慮）
-        max_ascent = max([font.metrics("ascent")
+        max_ascent = max([-font.getMetrics().fAscent
                          for _, _, font, _ in self.line])
 
         # ベースラインの y座標を計算
         baseline = self.cursor_y + 1.25 * max_ascent
 
         # 行内の最大ディセントを計算
-        max_descent = max([font.metrics("descent")
+        max_descent = max([font.getMetrics().fDescent
                           for _, _, font, _ in self.line])
 
         # 次の行の y座標を更新（レディングを考慮）
@@ -692,7 +740,7 @@ class BlockLayout:
         size = int(float(node.style["font-size"][:-2]) * .75)
 
         font = get_font(size, weight, style)
-        w = font.measure(word)
+        w = font.measureText(word)
 
         # カーソルが右端を超えたら改行
         if self.cursor_x + w > self.width:
@@ -705,7 +753,7 @@ class BlockLayout:
         line.children.append(text)
 
         # カーソルを単語の幅だけ右に移動（スペース分も考慮）
-        self.cursor_x += w + font.measure(" ")
+        self.cursor_x += w + font.measureText(" ")
 
     def new_line(self):
         self.cursor_x = 0
@@ -714,7 +762,7 @@ class BlockLayout:
         self.children.append(new_line)
 
     def self_rect(self):
-        return Rect(self.x, self.y, self.x + self.width, self.y + self.height)
+        return skia.Rect.MakeLTRB(self.x, self.y, self.x + self.width, self.y + self.height)
 
     def paint(self):
         cmds = []
@@ -723,9 +771,32 @@ class BlockLayout:
             cmds.append(rect)
         bgcolor = self.node.style.get("background-color", "transparent")
         if bgcolor != "transparent":
-            rect = DrawRect(self.self_rect(), bgcolor)
+            radius = float(self.node.style.get("border-radius", "0px")[:-2])
+            rect = DrawRRect(self.self_rect(), radius, bgcolor)
             cmds.append(rect)
         return cmds
+
+    def paint_effects(self, cmds):
+        cmds = paint_visual_effects(self.node, cmds, self.self_rect())
+        return cmds
+
+
+class Opacity:
+    def __init__(self, opacity, children):
+        self.opacity = opacity
+        self.children = children
+        self.rect = skia.Rect.MakeEmpty()
+        for cmd in self.children:
+            self.rect.join(cmd.rect)
+
+    def execute(self, canvas):
+        paint = skia.Paint(
+            Alphaf=self.opacity,
+        )
+        canvas.saveLayer(None, paint)
+        for cmd in self.children:
+            cmd.execute(canvas)
+        canvas.restore()
 
 
 class LineLayout:
@@ -754,7 +825,7 @@ class LineLayout:
             return
 
         # 行内の最大アセントを計算（レディングを考慮）
-        max_ascent = max([word.font.metrics("ascent")
+        max_ascent = max([-word.font.getMetrics().fAscent
                          for word in self.children])
 
         # ベースラインの y座標を計算
@@ -762,10 +833,10 @@ class LineLayout:
 
         # 各単語をベースラインに合わせて配置
         for word in self.children:
-            word.y = baseline - word.font.metrics("ascent")
+            word.y = baseline + word.font.getMetrics().fAscent
 
         # 行内の最大ディセントを計算
-        max_descent = max([word.font.metrics("descent")
+        max_descent = max([word.font.getMetrics().fDescent
                           for word in self.children])
 
         # 行の高さを更新（レディングを考慮）
@@ -773,6 +844,9 @@ class LineLayout:
 
     def paint(self):
         return []
+
+    def paint_effects(self, cmds):
+        return cmds
 
 
 class TextLayout:
@@ -795,19 +869,22 @@ class TextLayout:
         size = int(float(self.node.style["font-size"][:-2]) * .75)
 
         self.font = get_font(size, weight, style)
-        self.width = self.font.measure(self.word)
+        self.width = self.font.measureText(self.word)
 
         if self.previous:
-            space = self.previous.font.measure(" ")
+            space = self.previous.font.measureText(" ")
             self.x = self.previous.x + self.previous.width + space
         else:
             self.x = self.parent.x
 
-        self.height = self.font.metrics("linespace")
+        self.height = linespace(self.font)
 
     def paint(self):
         color = self.node.style["color"]
         return [DrawText(self.x, self.y, self.word, self.font, color)]
+
+    def paint_effects(self, cmds):
+        return cmds
 
 
 INPUT_WIDTH_PX = 200
@@ -825,7 +902,7 @@ class InputLayout:
         self.height = 0
 
     def self_rect(self):
-        return Rect(self.x, self.y, self.x + self.width, self.y + self.height)
+        return skia.Rect.MakeLTRB(self.x, self.y, self.x + self.width, self.y + self.height)
 
     def should_paint(self):
         return True
@@ -841,12 +918,12 @@ class InputLayout:
         self.width = INPUT_WIDTH_PX
 
         if self.previous:
-            space = self.previous.font.measure(" ")
+            space = self.previous.font.measureText(" ")
             self.x = self.previous.x + self.previous.width + space
         else:
             self.x = self.parent.x
 
-        self.height = self.font.metrics("linespace")
+        self.height = linespace(self.font)
 
     def paint(self):
         cmds = []
@@ -863,11 +940,14 @@ class InputLayout:
                 print("Ignoring HTML contents inside button")
                 text = ""
         if self.node.is_focused:
-            cx = self.x + self.font.measure(text)
+            cx = self.x + self.font.measureText(text)
             cmds.append(DrawLine(cx, self.y, cx,
                         self.y + self.height, "black", 1))
         color = self.node.style["color"]
         cmds.append(DrawText(self.x, self.y, text, self.font, color))
+        return cmds
+
+    def paint_effects(self, cmds):
         return cmds
 
 
@@ -875,18 +955,21 @@ class DrawText:
     def __init__(self, x1, y1, text, font, color):
         self.text = text
         self.font = font
-        self.rect = Rect(x1, y1, x1 + font.measure(text),
-                         y1 + font.metrics("linespace"))
+        self.top = y1
+        self.left = x1
+        self.right = x1 + font.measureText(text)
+        self.bottom = y1 + linespace(font)
+        self.rect = skia.Rect.MakeLTRB(x1, y1, self.right, self.bottom)
         self.color = color
 
-    def execute(self, scroll, canvas):
-        canvas.create_text(
-            self.rect.left,
-            self.rect.top - scroll,
-            text=self.text,
-            font=self.font,
-            anchor="nw",
-            fill=self.color)
+    def execute(self, canvas):
+        paint = skia.Paint(
+            AntiAlias=True,
+            Color=parse_color(self.color),
+        )
+        baseline = self.top - self.font.getMetrics().fAscent
+        canvas.drawString(self.text, float(self.left),
+                          baseline, self.font, paint)
 
 
 class DrawRect:
@@ -894,32 +977,42 @@ class DrawRect:
         self.color = color
         self.rect = rect
 
-    def execute(self, scroll, canvas):
-        canvas.create_rectangle(
-            self.rect.left,
-            self.rect.top - scroll,
-            self.rect.right,
-            self.rect.bottom - scroll,
-            width=0,
-            fill=self.color,
+    def execute(self, canvas):
+        paint = skia.Paint(
+            Color=parse_color(self.color),
         )
+        canvas.drawRect(self.rect, paint)
+
+
+class DrawRRect:
+    def __init__(self, rect, radius, color):
+        self.color = color
+        self.rect = rect
+        self.rrect = skia.RRect.MakeRectXY(rect, radius, radius)
+
+    def execute(self, canvas):
+        sk_color = parse_color(self.color)
+        canvas.drawRRect(self.rrect, paint=skia.Paint(Color=sk_color))
 
 
 class DrawLine:
     def __init__(self, x1, y1, x2, y2, color, thickness):
-        self.rect = Rect(x1, y1, x2, y2)
+        self.rect = skia.Rect.MakeLTRB(x1, y1, x2, y2)
         self.color = color
         self.thickness = thickness
 
-    def execute(self, scroll, canvas):
-        canvas.create_line(
-            self.rect.left,
-            self.rect.top - scroll,
-            self.rect.right,
-            self.rect.bottom - scroll,
-            fill=self.color,
-            width=self.thickness,
+    def execute(self, canvas):
+        path = (
+            skia.Path()
+            .moveTo(self.rect.left(), self.rect.top())
+            .lineTo(self.rect.right(), self.rect.bottom())
         )
+        paint = skia.Paint(
+            Color=parse_color(self.color),
+            StrokeWidth=self.thickness,
+            Style=skia.Paint.kStroke_Style,
+        )
+        canvas.drawPath(path, paint)
 
 
 class DrawOutline:
@@ -928,22 +1021,61 @@ class DrawOutline:
         self.color = color
         self.thickness = thickness
 
-    def execute(self, scroll, canvas):
-        canvas.create_rectangle(
-            self.rect.left,
-            self.rect.top - scroll,
-            self.rect.right,
-            self.rect.bottom - scroll,
-            width=self.thickness,
-            outline=self.color,
+    def execute(self, canvas):
+        paint = skia.Paint(
+            Color=parse_color(self.color),
+            StrokeWidth=self.thickness,
+            Style=skia.Paint.kStroke_Style,
         )
+        canvas.drawRect(self.rect, paint)
+
+
+class Blend:
+    def __init__(self, opacity, blend_mode, children):
+        self.opacity = opacity
+        self.blend_mode = blend_mode
+        self.should_save = self.blend_mode or self.opacity < 1
+        self.children = children
+        self.rect = skia.Rect.MakeEmpty()
+        for cmd in self.children:
+            self.rect.join(cmd.rect)
+
+    def execute(self, canvas):
+        paint = skia.Paint(
+            Alphaf=self.opacity,
+            BlendMode=parse_blend_mode(self.blend_mode),
+        )
+        if self.should_save:
+            canvas.saveLayer(None, paint)
+        for cmd in self.children:
+            cmd.execute(canvas)
+        if self.should_save:
+            canvas.restore()
 
 
 def paint_tree(layout_object, display_list):
+    cmds = []
     if layout_object.should_paint():
-        display_list.extend(layout_object.paint())
+        cmds = layout_object.paint()
     for child in layout_object.children:
         paint_tree(child, display_list)
+
+    if layout_object.should_paint():
+        cmds = layout_object.paint_effects(cmds)
+    display_list.extend(cmds)
+
+
+def paint_visual_effects(node, cmds, rect):
+    opacity = float(node.style.get("opacity", "1.0"))
+    blend_mode = node.style.get("mix-blend-mode")
+    if node.style.get("overflow", "visible") == "clip":
+        if not blend_mode:
+            blend_mode = "source-over"
+        border_radius = float(node.style.get("border-radius", "0px")[:-2])
+        cmds.append(
+            Blend(1.0, "destination-in", [DrawRRect(rect, border_radius, "white")]))
+
+    return [Blend(opacity, blend_mode, cmds)]
 
 
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type));"
@@ -1084,14 +1216,9 @@ class Tab:
         url = self.url.resolve(elt.attributes["action"])
         self.load(url, body)
 
-    def draw(self, canvas, offset):
+    def raster(self, canvas):
         for cmd in self.display_list:
-            # 見えない範囲はスキップ
-            if cmd.rect.top > self.scroll + self.tab_height:
-                continue
-            if cmd.rect.bottom < self.scroll:
-                continue
-            cmd.execute(self.scroll - offset, canvas)
+            cmd.execute(canvas)
 
     def load(self, url, payload=None):
         headers, body = url.request(self.url, payload)
@@ -1185,14 +1312,14 @@ class Chrome:
     def __init__(self, browser):
         self.browser = browser
         self.font = get_font(20, "normal", "roman")
-        self.font_height = self.font.metrics("linespace")
+        self.font_height = linespace(self.font)
         self.padding = 5
 
         # タブバー関連のプロパティ
         self.tabbar_top = 0
         self.tabbar_bottom = self.font_height + 2 * self.padding
-        plus_width = self.font.measure("+") + 2 * self.padding
-        self.newtab_rect = Rect(
+        plus_width = self.font.measureText("+") + 2 * self.padding
+        self.newtab_rect = skia.Rect.MakeLTRB(
             self.padding,
             self.padding,
             self.padding + plus_width,
@@ -1202,15 +1329,15 @@ class Chrome:
         # URLバー関連のプロパティ
         self.urlbar_top = self.tabbar_bottom
         self.urlbar_bottom = self.urlbar_top + self.font_height + 2 * self.padding
-        back_width = self.font.measure("<") + 2 * self.padding
-        self.back_rect = Rect(
+        back_width = self.font.measureText("<") + 2 * self.padding
+        self.back_rect = skia.Rect.MakeLTRB(
             self.padding,
             self.urlbar_top + self.padding,
             self.padding + back_width,
             self.urlbar_bottom - self.padding,
         )
-        self.address_rect = Rect(
-            self.back_rect.right + self.padding,
+        self.address_rect = skia.Rect.MakeLTRB(
+            self.back_rect.right() + self.padding,
             self.urlbar_top + self.padding,
             WIDTH - self.padding,
             self.urlbar_bottom - self.padding,
@@ -1222,9 +1349,9 @@ class Chrome:
         self.bottom = self.urlbar_bottom
 
     def tab_rect(self, i):
-        tabs_start = self.newtab_rect.right + self.padding
-        tab_width = self.font.measure("Tab X") + 2 * self.padding
-        return Rect(
+        tabs_start = self.newtab_rect.right() + self.padding
+        tab_width = self.font.measureText("Tab X") + 2 * self.padding
+        return skia.Rect.MakeLTRB(
             tabs_start + tab_width * i,
             self.tabbar_top,
             tabs_start + tab_width * (i + 1),
@@ -1234,27 +1361,28 @@ class Chrome:
     def paint(self):
         cmds = []
         # クロームの背景と区切り線の描画
-        cmds.append(DrawRect(Rect(0, 0, WIDTH, self.bottom), "white"))
+        cmds.append(DrawRect(skia.Rect.MakeLTRB(
+            0, 0, WIDTH, self.bottom), "white"))
         cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, "black", 1))
 
         # タブバーの描画
         cmds.append(DrawOutline(self.newtab_rect, "black", 1))
         cmds.append(DrawText(
-            self.newtab_rect.left + self.padding,
-            self.newtab_rect.top,
+            self.newtab_rect.left() + self.padding,
+            self.newtab_rect.top(),
             "+",
             self.font,
             "black",
         ))
         for i, tab in enumerate(self.browser.tabs):
             bounds = self.tab_rect(i)
-            cmds.append(DrawLine(bounds.left, 0, bounds.left,
-                        bounds.bottom, "black", 1))
-            cmds.append(DrawLine(bounds.right, 0, bounds.right,
-                        bounds.bottom, "black", 1))
+            cmds.append(DrawLine(bounds.left(), 0, bounds.left(),
+                        bounds.bottom(), "black", 1))
+            cmds.append(DrawLine(bounds.right(), 0, bounds.right(),
+                        bounds.bottom(), "black", 1))
             cmds.append(DrawText(
-                bounds.left + self.padding,
-                bounds.top + self.padding,
+                bounds.left() + self.padding,
+                bounds.top() + self.padding,
                 "Tab {}".format(i + 1),
                 self.font,
                 "black",
@@ -1262,16 +1390,16 @@ class Chrome:
 
             # アクティブなタブ用の追加描画
             if tab == self.browser.active_tab:
-                cmds.append(DrawLine(0, bounds.bottom, bounds.left,
-                            bounds.bottom, "black", 1))
-                cmds.append(DrawLine(bounds.right, bounds.bottom, WIDTH,
-                            bounds.bottom, "black", 1))
+                cmds.append(DrawLine(0, bounds.bottom(), bounds.left(),
+                            bounds.bottom(), "black", 1))
+                cmds.append(DrawLine(bounds.right(), bounds.bottom(), WIDTH,
+                            bounds.bottom(), "black", 1))
 
         # URLバーの描画
         cmds.append(DrawOutline(self.back_rect, "black", 1))
         cmds.append(DrawText(
-            self.back_rect.left + self.padding,
-            self.back_rect.top,
+            self.back_rect.left() + self.padding,
+            self.back_rect.top(),
             "<",
             self.font,
             "black",
@@ -1279,18 +1407,18 @@ class Chrome:
         cmds.append(DrawOutline(self.address_rect, "black", 1))
         if self.focus == "address bar":
             cmds.append(DrawText(
-                self.address_rect.left + self.padding,
-                self.address_rect.top,
+                self.address_rect.left() + self.padding,
+                self.address_rect.top(),
                 self.address_bar,
                 self.font,
                 "black",
             ))
-            w = self.font.measure(self.address_bar)
+            w = self.font.measureText(self.address_bar)
             cmds.append(DrawLine(
-                self.address_rect.left + self.padding + w,
-                self.address_rect.top,
-                self.address_rect.left + self.padding + w,
-                self.address_rect.bottom,
+                self.address_rect.left() + self.padding + w,
+                self.address_rect.top(),
+                self.address_rect.left() + self.padding + w,
+                self.address_rect.bottom(),
                 "red",
                 1,
             ))
@@ -1298,8 +1426,8 @@ class Chrome:
             url = str(
                 self.browser.active_tab.url) if self.browser.active_tab and self.browser.active_tab.url else ""
             cmds.append(DrawText(
-                self.address_rect.left + self.padding,
-                self.address_rect.top,
+                self.address_rect.left() + self.padding,
+                self.address_rect.top(),
                 url,
                 self.font,
                 "black",
@@ -1309,16 +1437,16 @@ class Chrome:
 
     def click(self, x, y):
         self.focus = None
-        if self.newtab_rect.containsPoint(x, y):
+        if self.newtab_rect.contains(x, y):
             self.browser.new_tab(URL("https://browser.engineering/"))
-        elif self.back_rect.containsPoint(x, y):
+        elif self.back_rect.contains(x, y):
             self.browser.active_tab.go_back()
-        elif self.address_rect.containsPoint(x, y):
+        elif self.address_rect.contains(x, y):
             self.focus = "address bar"
             self.address_bar = ""
         else:
             for i, tab in enumerate(self.browser.tabs):
-                if self.tab_rect(i).containsPoint(x, y):
+                if self.tab_rect(i).contains(x, y):
                     self.browser.active_tab = tab
                     break
 
@@ -1341,22 +1469,36 @@ class Browser:
     def __init__(self):
         self.tabs = []
         self.active_tab: Tab | None = None
-        self.window = tk.Tk()
-        self.canvas = tk.Canvas(
-            self.window,
-            width=WIDTH,
-            height=HEIGHT,
-            bg="white",
+        self.sdl_window = sdl2.SDL_CreateWindow(
+            b"Browser",
+            sdl2.SDL_WINDOWPOS_CENTERED,
+            sdl2.SDL_WINDOWPOS_CENTERED,
+            WIDTH,
+            HEIGHT,
+            sdl2.SDL_WINDOW_SHOWN
         )
-        self.canvas.pack()
-
-        # 下矢印キーに scrolldown メソッドをバインド
-        self.window.bind("<Down>", self.handle_down)
-        self.window.bind("<Button-1>", self.handle_click)
-        self.window.bind("<Key>", self.handle_key)
-        self.window.bind("<Return>", self.handle_enter)
-
+        self.root_surface = skia.Surface.MakeRaster(
+            skia.ImageInfo.Make(
+                WIDTH,
+                HEIGHT,
+                ct=skia.kRGBA_8888_ColorType,
+                at=skia.kUnpremul_AlphaType,
+            )
+        )
         self.chrome = Chrome(self)
+        if sdl2.SDL_BYTEORDER == sdl2.SDL_BIG_ENDIAN:
+            self.RED_MASK = 0xff000000
+            self.GREEN_MASK = 0x00ff0000
+            self.BLUE_MASK = 0x0000ff00
+            self.ALPHA_MASK = 0x000000ff
+        else:
+            self.RED_MASK = 0x000000ff
+            self.GREEN_MASK = 0x0000ff00
+            self.BLUE_MASK = 0x00ff0000
+            self.ALPHA_MASK = 0xff000000
+        self.chrome_surface = skia.Surface(
+            WIDTH, math.ceil(self.chrome.bottom))
+        self.tab_surface = None
 
     def handle_down(self, e):
         assert self.active_tab is not None
@@ -1368,25 +1510,82 @@ class Browser:
         if e.y < self.chrome.bottom:
             self.focus = None
             self.chrome.click(e.x, e.y)
+            self.raster_chrome()
         else:
             self.focus = "content"
             self.chrome.blur()
             tab_y = e.y - self.chrome.bottom
             self.active_tab.click(e.x, tab_y)
+            url = self.active_tab.url
+            if self.active_tab.url != url:
+                self.raster_chrome()
+            self.raster_tab()
         self.draw()
+
+    def raster_tab(self):
+        assert self.active_tab is not None
+        tab_height = math.ceil(self.active_tab.document.height + 2 * VSTEP)
+        if not self.tab_surface or tab_height != self.tab_surface.height():
+            self.tab_surface = skia.Surface(WIDTH, tab_height)
+        canvas = self.tab_surface.getCanvas()
+        canvas.clear(skia.ColorWHITE)
+        self.active_tab.raster(canvas)
+
+    def raster_chrome(self):
+        canvas = self.chrome_surface.getCanvas()
+        canvas.clear(skia.ColorWHITE)
+        for cmd in self.chrome.paint():
+            cmd.execute(canvas)
 
     def draw(self):
         assert self.active_tab is not None
-        self.canvas.delete("all")
-        self.active_tab.draw(self.canvas, self.chrome.bottom)
-        for cmd in self.chrome.paint():
-            cmd.execute(0, self.canvas)
+        assert self.tab_surface is not None
+
+        canvas = self.root_surface.getCanvas()
+        canvas.clear(skia.ColorWHITE)
+
+        # タブとクロームを合成
+        tab_rect = skia.Rect.MakeLTRB(0, self.chrome.bottom, WIDTH, HEIGHT)
+        tab_offset = self.chrome.bottom - self.active_tab.scroll
+        canvas.save()
+        canvas.clipRect(tab_rect)
+        canvas.translate(0, tab_offset)
+        self.tab_surface.draw(canvas, 0, 0)
+        canvas.restore()
+        chrome_rect = skia.Rect.MakeLTRB(0, 0, WIDTH, self.chrome.bottom)
+        canvas.save()
+        canvas.clipRect(chrome_rect)
+        self.chrome_surface.draw(canvas, 0, 0)
+        canvas.restore()
+
+        skia_image = self.root_surface.makeImageSnapshot()
+        skia_bytes = skia_image.tobytes()
+        depth = 32  # ピクセルごとのビット数（４バイト）
+        pitch = WIDTH * depth // 8  # 1行あたりのバイト
+        sdl_surface = sdl2.SDL_CreateRGBSurfaceFrom(
+            skia_bytes,
+            WIDTH,
+            HEIGHT,
+            depth,
+            pitch,
+            self.RED_MASK,
+            self.GREEN_MASK,
+            self.BLUE_MASK,
+            self.ALPHA_MASK,
+        )
+        rect = sdl2.SDL_Rect(0, 0, WIDTH, HEIGHT)
+        window_surface = sdl2.SDL_GetWindowSurface(self.sdl_window)
+        # 実際にコピーを行っているのは SDL_BlitSurface です
+        sdl2.SDL_BlitSurface(sdl_surface, rect, window_surface, rect)
+        sdl2.SDL_UpdateWindowSurface(self.sdl_window)
 
     def new_tab(self, url):
         new_tab = Tab(HEIGHT - self.chrome.bottom)
         new_tab.load(url)
         self.active_tab = new_tab
         self.tabs.append(new_tab)
+        self.raster_chrome()
+        self.raster_tab()
         self.draw()
 
     def handle_key(self, e):
@@ -1399,15 +1598,40 @@ class Browser:
             self.draw()
         elif self.focus == "content":
             self.active_tab.keypress(e.char)
+            self.raster_tab()
             self.draw()
 
     def handle_enter(self, e):
         self.chrome.enter()
         self.draw()
 
+    def handle_quit(self):
+        sdl2.SDL_DestroyWindow(self.sdl_window)
+
+
+def mainloop(browser):
+    event = sdl2.SDL_Event()
+    while True:
+        while sdl2.SDL_PollEvent(ctypes.byref(event)) != 0:
+            if event.type == sdl2.SDL_QUIT:
+                browser.handle_quit()
+                sdl2.SDL_Quit()
+                sys.exit()
+            elif event.type == sdl2.SDL_MOUSEBUTTONUP:
+                browser.handle_click(event.button)
+            elif event.type == sdl2.SDL_KEYDOWN:
+                if event.key.keysym.sym == sdl2.SDLK_RETURN:
+                    browser.handle_enter(event.key)
+                elif event.key.keysym.sym == sdl2.SDLK_DOWN:
+                    browser.handle_down(event.key)
+            elif event.type == sdl2.SDL_TEXTINPUT:
+                browser.handle_key(event.text.text.decode("utf-8"))
+
 
 if __name__ == "__main__":
     import sys
 
-    Browser().new_tab(URL(sys.argv[1]))
-    tk.mainloop()
+    sdl2.SDL_Init(sdl2.SDL_INIT_EVENTS)
+    browser = Browser()
+    browser.new_tab(URL(sys.argv[1]))
+    mainloop(browser)
