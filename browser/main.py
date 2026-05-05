@@ -748,7 +748,8 @@ class BlockLayout:
             cmds.append(rect)
         bgcolor = self.node.style.get("background-color", "transparent")
         if bgcolor != "transparent":
-            rect = DrawRect(self.self_rect(), bgcolor)
+            radius = float(self.node.style.get("border-radius", "0px")[:-2])
+            rect = DrawRRect(self.self_rect(), radius, bgcolor)
             cmds.append(rect)
         return cmds
 
@@ -927,6 +928,17 @@ class DrawRect:
             Color=parse_color(self.color),
         )
         canvas.drawRect(self.rect.makeOffset(0, -scroll), paint)
+
+
+class DrawRRect:
+    def __init__(self, rect, radius, color):
+        self.color = color
+        self.rect = rect
+        self.rrect = skia.RRect.MakeRectXY(rect, radius, radius)
+
+    def execute(self, scroll, canvas):
+        sk_color = parse_color(self.color)
+        canvas.drawRRect(self.rrect, paint=skia.Paint(Color=sk_color))
 
 
 class DrawLine:
