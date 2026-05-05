@@ -2,6 +2,7 @@
 import base64
 import ctypes
 import logging
+import math
 import socket
 from datetime import datetime
 from urllib.parse import quote, unquote_to_bytes
@@ -908,12 +909,12 @@ class DrawText:
         self.rect = skia.Rect.MakeLTRB(x1, y1, self.right, self.bottom)
         self.color = color
 
-    def execute(self, scroll, canvas):
+    def execute(self, canvas):
         paint = skia.Paint(
             AntiAlias=True,
             Color=parse_color(self.color),
         )
-        baseline = self.top - scroll - self.font.getMetrics().fAscent
+        baseline = self.top - self.font.getMetrics().fAscent
         canvas.drawString(self.text, float(self.left),
                           baseline, self.font, paint)
 
@@ -923,11 +924,11 @@ class DrawRect:
         self.color = color
         self.rect = rect
 
-    def execute(self, scroll, canvas):
+    def execute(self, canvas):
         paint = skia.Paint(
             Color=parse_color(self.color),
         )
-        canvas.drawRect(self.rect.makeOffset(0, -scroll), paint)
+        canvas.drawRect(self.rect, paint)
 
 
 class DrawRRect:
@@ -936,7 +937,7 @@ class DrawRRect:
         self.rect = rect
         self.rrect = skia.RRect.MakeRectXY(rect, radius, radius)
 
-    def execute(self, scroll, canvas):
+    def execute(self, canvas):
         sk_color = parse_color(self.color)
         canvas.drawRRect(self.rrect, paint=skia.Paint(Color=sk_color))
 
@@ -947,9 +948,12 @@ class DrawLine:
         self.color = color
         self.thickness = thickness
 
-    def execute(self, scroll, canvas):
-        path = skia.Path().moveTo(self.rect.left(), self.rect.top() -
-                                  scroll).lineTo(self.rect.right(), self.rect.bottom() - scroll)
+    def execute(self, canvas):
+        path = (
+            skia.Path()
+            .moveTo(self.rect.left(), self.rect.top())
+            .lineTo(self.rect.right(), self.rect.bottom())
+        )
         paint = skia.Paint(
             Color=parse_color(self.color),
             StrokeWidth=self.thickness,
@@ -964,13 +968,13 @@ class DrawOutline:
         self.color = color
         self.thickness = thickness
 
-    def execute(self, scroll, canvas):
+    def execute(self, canvas):
         paint = skia.Paint(
             Color=parse_color(self.color),
             StrokeWidth=self.thickness,
             Style=skia.Paint.kStroke_Style,
         )
-        canvas.drawRect(self.rect.makeOffset(0, -scroll), paint)
+        canvas.drawRect(self.rect, paint)
 
 
 def paint_tree(layout_object, display_list):
@@ -1118,14 +1122,9 @@ class Tab:
         url = self.url.resolve(elt.attributes["action"])
         self.load(url, body)
 
-    def draw(self, canvas, offset):
+    def raster(self, canvas):
         for cmd in self.display_list:
-            # 見えない範囲はスキップ
-            if cmd.rect.top() > self.scroll + self.tab_height:
-                continue
-            if cmd.rect.bottom() < self.scroll:
-                continue
-            cmd.execute(self.scroll - offset, canvas)
+            cmd.execute(canvas)
 
     def load(self, url, payload=None):
         headers, body = url.request(self.url, payload)
@@ -1403,6 +1402,9 @@ class Browser:
             self.GREEN_MASK = 0x0000ff00
             self.BLUE_MASK = 0x00ff0000
             self.ALPHA_MASK = 0xff000000
+        self.chrome_surface = skia.Surface(
+            WIDTH, math.ceil(self.chrome.bottom))
+        self.tab_surface = None
 
     def handle_down(self, e):
         assert self.active_tab is not None
@@ -1414,20 +1416,54 @@ class Browser:
         if e.y < self.chrome.bottom:
             self.focus = None
             self.chrome.click(e.x, e.y)
+            self.raster_chrome()
         else:
             self.focus = "content"
             self.chrome.blur()
             tab_y = e.y - self.chrome.bottom
             self.active_tab.click(e.x, tab_y)
+            url = self.active_tab.url
+            if self.active_tab.url != url:
+                self.raster_chrome()
+            self.raster_tab()
         self.draw()
+
+    def raster_tab(self):
+        assert self.active_tab is not None
+        tab_height = math.ceil(self.active_tab.document.height + 2 * VSTEP)
+        if not self.tab_surface or tab_height != self.tab_surface.height():
+            self.tab_surface = skia.Surface(WIDTH, tab_height)
+        canvas = self.tab_surface.getCanvas()
+        canvas.clear(skia.ColorWHITE)
+        self.active_tab.raster(canvas)
+
+    def raster_chrome(self):
+        canvas = self.chrome_surface.getCanvas()
+        canvas.clear(skia.ColorWHITE)
+        for cmd in self.chrome.paint():
+            cmd.execute(canvas)
 
     def draw(self):
         assert self.active_tab is not None
+        assert self.tab_surface is not None
+
         canvas = self.root_surface.getCanvas()
         canvas.clear(skia.ColorWHITE)
-        self.active_tab.draw(canvas, self.chrome.bottom)
-        for cmd in self.chrome.paint():
-            cmd.execute(0, canvas)
+
+        # タブとクロームを合成
+        tab_rect = skia.Rect.MakeLTRB(0, self.chrome.bottom, WIDTH, HEIGHT)
+        tab_offset = self.chrome.bottom - self.active_tab.scroll
+        canvas.save()
+        canvas.clipRect(tab_rect)
+        canvas.translate(0, tab_offset)
+        self.tab_surface.draw(canvas, 0, 0)
+        canvas.restore()
+        chrome_rect = skia.Rect.MakeLTRB(0, 0, WIDTH, self.chrome.bottom)
+        canvas.save()
+        canvas.clipRect(chrome_rect)
+        self.chrome_surface.draw(canvas, 0, 0)
+        canvas.restore()
+
         skia_image = self.root_surface.makeImageSnapshot()
         skia_bytes = skia_image.tobytes()
         depth = 32  # ピクセルごとのビット数（４バイト）
@@ -1454,6 +1490,8 @@ class Browser:
         new_tab.load(url)
         self.active_tab = new_tab
         self.tabs.append(new_tab)
+        self.raster_chrome()
+        self.raster_tab()
         self.draw()
 
     def handle_key(self, e):
@@ -1466,6 +1504,7 @@ class Browser:
             self.draw()
         elif self.focus == "content":
             self.active_tab.keypress(e.char)
+            self.raster_tab()
             self.draw()
 
     def handle_enter(self, e):
