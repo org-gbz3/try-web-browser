@@ -527,6 +527,8 @@ def parse_blend_mode(blend_mode_str):
         return skia.BlendMode.kDifference
     elif blend_mode_str == "destination-in":
         return skia.BlendMode.kDstIn
+    elif blend_mode_str == "source-over":
+        return skia.BlendMode.kSrcOver
     else:
         return skia.BlendMode.kSrcOver  # デフォルトは通常の合成
 
@@ -1029,8 +1031,10 @@ class DrawOutline:
 
 
 class Blend:
-    def __init__(self, blend_mode, children):
+    def __init__(self, opacity, blend_mode, children):
+        self.opacity = opacity
         self.blend_mode = blend_mode
+        self.should_save = self.blend_mode or self.opacity < 1
         self.children = children
         self.rect = skia.Rect.MakeEmpty()
         for cmd in self.children:
@@ -1038,12 +1042,15 @@ class Blend:
 
     def execute(self, canvas):
         paint = skia.Paint(
+            Alphaf=self.opacity,
             BlendMode=parse_blend_mode(self.blend_mode),
         )
-        canvas.saveLayer(None, paint)
+        if self.should_save:
+            canvas.saveLayer(None, paint)
         for cmd in self.children:
             cmd.execute(canvas)
-        canvas.restore()
+        if self.should_save:
+            canvas.restore()
 
 
 def paint_tree(layout_object, display_list):
@@ -1062,15 +1069,13 @@ def paint_visual_effects(node, cmds, rect):
     opacity = float(node.style.get("opacity", "1.0"))
     blend_mode = node.style.get("mix-blend-mode")
     if node.style.get("overflow", "visible") == "clip":
+        if not blend_mode:
+            blend_mode = "source-over"
         border_radius = float(node.style.get("border-radius", "0px")[:-2])
         cmds.append(
-            Blend("destination-in", [DrawRRect(rect, border_radius, "white")]))
+            Blend(1.0, "destination-in", [DrawRRect(rect, border_radius, "white")]))
 
-    return [
-        Blend(blend_mode, [
-            Opacity(opacity, cmds)
-        ]),
-    ]
+    return [Blend(opacity, blend_mode, cmds)]
 
 
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type));"
