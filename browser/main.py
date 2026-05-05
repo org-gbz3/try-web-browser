@@ -533,6 +533,34 @@ def parse_blend_mode(blend_mode_str):
         return skia.BlendMode.kSrcOver  # デフォルトは通常の合成
 
 
+class Task:
+    def __init__(self, task_code, *args):
+        self.task_code = task_code
+        self.args = args
+
+    def run(self):
+        assert self.task_code is not None, "Task has already been run"
+        assert self.args is not None, "Task has already been run"
+        result = self.task_code(*self.args)
+        print("Script returned: ", result)
+        self.task_code = None
+        self.args = None
+
+
+class TaskRunner:
+    def __init__(self, tab):
+        self.tab = tab
+        self.tasks = []
+
+    def schedule_task(self, task):
+        self.tasks.append(task)
+
+    def run(self):
+        if len(self.tasks) > 0:
+            task = self.tasks.pop(0)
+            task.run()
+
+
 DEFAULT_STYLE_SHEET = CSSParser(open("browser/browser.css").read()).parse()
 INHERITED_PROPERTIES = {
     "font-size": "16px",
@@ -1161,6 +1189,7 @@ class Tab:
         self.tab_height = tab_height
         self.history = []
         self.focus = None
+        self.task_runner = TaskRunner(self)
 
     def click(self, x, y):
         self.focus = None
@@ -1259,7 +1288,9 @@ class Tab:
                 logging.warning("Failed to load script: %s", script_url_s)
                 continue
             logging.info("Loaded script: %s", script_url_s)
-            print("Script returned: ", self.js.run(script, body))
+            # print("Script returned: ", self.js.run(script, body))
+            task = Task(self.js.run, script_url, body)
+            self.task_runner.schedule_task(task)
 
         # CSSルールを読み込む
         links = [node.attributes["href"]
@@ -1626,6 +1657,7 @@ def mainloop(browser):
                     browser.handle_down(event.key)
             elif event.type == sdl2.SDL_TEXTINPUT:
                 browser.handle_key(event.text.text.decode("utf-8"))
+        browser.active_tab.task_runner.run()
 
 
 if __name__ == "__main__":
