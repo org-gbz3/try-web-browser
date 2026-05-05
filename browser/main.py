@@ -520,6 +520,15 @@ def parse_color(color):
         return skia.ColorGRAY  # デフォルトは灰色
 
 
+def parse_blend_mode(blend_mode_str):
+    if blend_mode_str == "multiply":
+        return skia.BlendMode.kMultiply
+    elif blend_mode_str == "difference":
+        return skia.BlendMode.kDifference
+    else:
+        return skia.BlendMode.kSrcOver  # デフォルトは通常の合成
+
+
 DEFAULT_STYLE_SHEET = CSSParser(open("browser/browser.css").read()).parse()
 INHERITED_PROPERTIES = {
     "font-size": "16px",
@@ -766,13 +775,6 @@ class BlockLayout:
     def paint_effects(self, cmds):
         cmds = paint_visual_effects(self.node, cmds, self.self_rect())
         return cmds
-
-
-def paint_visual_effects(node, cmds, rect):
-    opacity = float(node.style.get("opacity", "1.0"))
-    return [
-        Opacity(opacity, cmds)
-    ]
 
 
 class Opacity:
@@ -1024,6 +1026,24 @@ class DrawOutline:
         canvas.drawRect(self.rect, paint)
 
 
+class Blend:
+    def __init__(self, blend_mode, children):
+        self.blend_mode = blend_mode
+        self.children = children
+        self.rect = skia.Rect.MakeEmpty()
+        for cmd in self.children:
+            self.rect.join(cmd.rect)
+
+    def execute(self, canvas):
+        paint = skia.Paint(
+            BlendMode=parse_blend_mode(self.blend_mode),
+        )
+        canvas.saveLayer(None, paint)
+        for cmd in self.children:
+            cmd.execute(canvas)
+        canvas.restore()
+
+
 def paint_tree(layout_object, display_list):
     cmds = []
     if layout_object.should_paint():
@@ -1034,6 +1054,17 @@ def paint_tree(layout_object, display_list):
     if layout_object.should_paint():
         cmds = layout_object.paint_effects(cmds)
     display_list.extend(cmds)
+
+
+def paint_visual_effects(node, cmds, rect):
+    opacity = float(node.style.get("opacity", "1.0"))
+    blend_mode = node.style.get("mix-blend-mode")
+
+    return [
+        Blend(blend_mode, [
+            Opacity(opacity, cmds)
+        ]),
+    ]
 
 
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type));"
