@@ -610,6 +610,9 @@ class DocumentLayout:
     def paint(self):
         return []
 
+    def paint_effects(self, cmds):
+        return cmds
+
 
 class BlockLayout:
     def __init__(self, node, parent, previous):
@@ -760,6 +763,35 @@ class BlockLayout:
             cmds.append(rect)
         return cmds
 
+    def paint_effects(self, cmds):
+        cmds = paint_visual_effects(self.node, cmds, self.self_rect())
+        return cmds
+
+
+def paint_visual_effects(node, cmds, rect):
+    opacity = float(node.style.get("opacity", "1.0"))
+    return [
+        Opacity(opacity, cmds)
+    ]
+
+
+class Opacity:
+    def __init__(self, opacity, children):
+        self.opacity = opacity
+        self.children = children
+        self.rect = skia.Rect.MakeEmpty()
+        for cmd in self.children:
+            self.rect.join(cmd.rect)
+
+    def execute(self, canvas):
+        paint = skia.Paint(
+            Alphaf=self.opacity,
+        )
+        canvas.saveLayer(None, paint)
+        for cmd in self.children:
+            cmd.execute(canvas)
+        canvas.restore()
+
 
 class LineLayout:
     def __init__(self, node, parent, previous):
@@ -807,6 +839,9 @@ class LineLayout:
     def paint(self):
         return []
 
+    def paint_effects(self, cmds):
+        return cmds
+
 
 class TextLayout:
     def __init__(self, node, word, parent, previous):
@@ -841,6 +876,9 @@ class TextLayout:
     def paint(self):
         color = self.node.style["color"]
         return [DrawText(self.x, self.y, self.word, self.font, color)]
+
+    def paint_effects(self, cmds):
+        return cmds
 
 
 INPUT_WIDTH_PX = 200
@@ -901,6 +939,9 @@ class InputLayout:
                         self.y + self.height, "black", 1))
         color = self.node.style["color"]
         cmds.append(DrawText(self.x, self.y, text, self.font, color))
+        return cmds
+
+    def paint_effects(self, cmds):
         return cmds
 
 
@@ -984,10 +1025,15 @@ class DrawOutline:
 
 
 def paint_tree(layout_object, display_list):
+    cmds = []
     if layout_object.should_paint():
-        display_list.extend(layout_object.paint())
+        cmds = layout_object.paint()
     for child in layout_object.children:
         paint_tree(child, display_list)
+
+    if layout_object.should_paint():
+        cmds = layout_object.paint_effects(cmds)
+    display_list.extend(cmds)
 
 
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type));"
