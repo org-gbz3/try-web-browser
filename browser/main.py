@@ -1,14 +1,15 @@
 
 import base64
+import ctypes
 import logging
 import socket
-import tkinter as tk
-import tkinter.font
 from datetime import datetime
 from urllib.parse import quote, unquote_to_bytes
 from zoneinfo import ZoneInfo
 
 import dukpy
+import sdl2
+import skia
 
 
 # JST タイムゾーンの設定
@@ -459,6 +460,33 @@ class DescendantSelector:
         return "<DescendantSelector {} {}>".format(self.anncestor, self.descendant)
 
 
+class Font:
+    def __init__(self, size, weight, slant):
+        if weight == "bold" and slant == "italic":
+            style = skia.FontStyle.BoldItalic()
+        elif weight == "bold":
+            style = skia.FontStyle.Bold()
+        elif slant == "italic":
+            style = skia.FontStyle.Italic()
+        else:
+            style = skia.FontStyle.Normal()
+        typeface = skia.Typeface.MakeFromName(None, style)
+        self._font = skia.Font(typeface, size)
+        self._metrics = self._font.getMetrics()
+
+    def measure(self, text):
+        return self._font.measureText(text)
+
+    def metrics(self, name):
+        if name == "ascent":
+            return -self._metrics.fAscent
+        elif name == "descent":
+            return self._metrics.fDescent
+        elif name == "linespace":
+            return self._metrics.fDescent - self._metrics.fAscent
+        raise ValueError(f"Unknown metric: {name}")
+
+
 FONTS = {}
 
 
@@ -466,13 +494,34 @@ def get_font(size, weight, slant):
     # フォントキャッシュからフォントを取得
     key = (size, weight, slant)
     if key not in FONTS:
-        # フォントを作成
-        font = tkinter.font.Font(size=size, weight=weight, slant=slant)
-        # パフォーマンス向上のための Label オブジェクト（Tkinter の推奨）
-        label = tk.Label(font=font)
-        FONTS[key] = (font, label)
+        FONTS[key] = Font(size, weight, slant)
+    return FONTS[key]
 
-    return FONTS[key][0]
+
+NAMED_COLORS = {
+    "black": "#000000",
+    "gray": "#808080",
+    "white": "#ffffff",
+    "red": "#ff0000",
+    "green": "#00ff00",
+    "blue": "#0000ff",
+    "lightblue": "#add8e6",
+    "lightgreen": "#90ee90",
+    "orange": "#ffa500",
+    "orangered": "#ff4500",
+}
+
+
+def parse_color(color):
+    if color.startswith("#") and len(color) == 7:
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        return skia.Color(r, g, b)
+    elif color in NAMED_COLORS:
+        return parse_color(NAMED_COLORS[color])
+    else:
+        return skia.ColorBLACK  # デフォルトは黒
 
 
 DEFAULT_STYLE_SHEET = CSSParser(open("browser/browser.css").read()).parse()
@@ -1341,22 +1390,33 @@ class Browser:
     def __init__(self):
         self.tabs = []
         self.active_tab: Tab | None = None
-        self.window = tk.Tk()
-        self.canvas = tk.Canvas(
-            self.window,
-            width=WIDTH,
-            height=HEIGHT,
-            bg="white",
+        self.sdl_window = sdl2.SDL_CreateWindow(
+            b"Browser",
+            sdl2.SDL_WINDOWPOS_CENTERED,
+            sdl2.SDL_WINDOWPOS_CENTERED,
+            WIDTH,
+            HEIGHT,
+            sdl2.SDL_WINDOW_SHOWN
         )
-        self.canvas.pack()
-
-        # 下矢印キーに scrolldown メソッドをバインド
-        self.window.bind("<Down>", self.handle_down)
-        self.window.bind("<Button-1>", self.handle_click)
-        self.window.bind("<Key>", self.handle_key)
-        self.window.bind("<Return>", self.handle_enter)
-
+        self.root_surface = skia.Surface.MakeRaster(
+            skia.ImageInfo.Make(
+                WIDTH,
+                HEIGHT,
+                ct=skia.kRGBA_8888_ColorType,
+                at=skia.kUnpremul_AlphaType,
+            )
+        )
         self.chrome = Chrome(self)
+        if sdl2.SDL_BYTEORDER == sdl2.SDL_BIG_ENDIAN:
+            self.RED_MASK = 0xff000000
+            self.GREEN_MASK = 0x00ff0000
+            self.BLUE_MASK = 0x0000ff00
+            self.ALPHA_MASK = 0x000000ff
+        else:
+            self.RED_MASK = 0x000000ff
+            self.GREEN_MASK = 0x0000ff00
+            self.BLUE_MASK = 0x00ff0000
+            self.ALPHA_MASK = 0xff000000
 
     def handle_down(self, e):
         assert self.active_tab is not None
@@ -1377,10 +1437,30 @@ class Browser:
 
     def draw(self):
         assert self.active_tab is not None
-        self.canvas.delete("all")
-        self.active_tab.draw(self.canvas, self.chrome.bottom)
-        for cmd in self.chrome.paint():
-            cmd.execute(0, self.canvas)
+        # self.canvas.delete("all")
+        # self.active_tab.draw(self.canvas, self.chrome.bottom)
+        # for cmd in self.chrome.paint():
+        #     cmd.execute(0, self.canvas)
+        skia_image = self.root_surface.makeImageSnapshot()
+        skia_bytes = skia_image.tobytes()
+        depth = 32  # ピクセルごとのビット数（４バイト）
+        pitch = WIDTH * depth // 8  # 1行あたりのバイト
+        sdl_surface = sdl2.SDL_CreateRGBSurfaceFrom(
+            skia_bytes,
+            WIDTH,
+            HEIGHT,
+            depth,
+            pitch,
+            self.RED_MASK,
+            self.GREEN_MASK,
+            self.BLUE_MASK,
+            self.ALPHA_MASK,
+        )
+        rect = sdl2.SDL_Rect(0, 0, WIDTH, HEIGHT)
+        window_surface = sdl2.SDL_GetWindowSurface(self.sdl_window)
+        # 実際にコピーを行っているのは SDL_BlitSurface です
+        sdl2.SDL_BlitSurface(sdl_surface, rect, window_surface, rect)
+        sdl2.SDL_UpdateWindowSurface(self.sdl_window)
 
     def new_tab(self, url):
         new_tab = Tab(HEIGHT - self.chrome.bottom)
@@ -1405,9 +1485,33 @@ class Browser:
         self.chrome.enter()
         self.draw()
 
+    def handle_quit(self):
+        sdl2.SDL_DestroyWindow(self.sdl_window)
+
+
+def mainloop(browser):
+    event = sdl2.SDL_Event()
+    while True:
+        while sdl2.SDL_PollEvent(ctypes.byref(event)) != 0:
+            if event.type == sdl2.SDL_QUIT:
+                browser.handle_quit()
+                sdl2.SDL_Quit()
+                sys.exit()
+            elif event.type == sdl2.SDL_MOUSEBUTTONUP:
+                browser.handle_click(event.button)
+            elif event.type == sdl2.SDL_KEYDOWN:
+                if event.key.keysym.sym == sdl2.SDLK_RETURN:
+                    browser.handle_enter(event.key)
+                elif event.key.keysym.sym == sdl2.SDLK_DOWN:
+                    browser.handle_down(event.key)
+            elif event.type == sdl2.SDL_TEXTINPUT:
+                browser.handle_key(event.text.text.decode("utf-8"))
+
 
 if __name__ == "__main__":
     import sys
 
-    Browser().new_tab(URL(sys.argv[1]))
-    tk.mainloop()
+    sdl2.SDL_Init(sdl2.SDL_INIT_EVENTS)
+    browser = Browser()
+    browser.new_tab(URL(sys.argv[1]))
+    mainloop(browser)
