@@ -58,3 +58,16 @@ XMLHttpRequest.prototype.open = function (method, url, is_async) {
 XMLHttpRequest.prototype.send = function (payload) {
     this.responseText = call_python("XMLHttpRequest_send", this.method, this.url, payload || "");
 }
+
+SET_TIMEOUT_REQUESTS = {}
+
+function setTimeout(callback, time_delta) {
+    var handle = Object.keys(SET_TIMEOUT_REQUESTS).length;
+    SET_TIMEOUT_REQUESTS[handle] = callback;
+    call_python("setTimeout", handle, time_delta);
+}
+
+function __runSetTimeout(handle) {
+    var callback = SET_TIMEOUT_REQUESTS[handle];
+    callback();
+}

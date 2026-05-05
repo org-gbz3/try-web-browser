@@ -4,6 +4,7 @@ import ctypes
 import logging
 import math
 import socket
+import threading
 from datetime import datetime
 from urllib.parse import quote, unquote_to_bytes
 from zoneinfo import ZoneInfo
@@ -551,13 +552,23 @@ class TaskRunner:
     def __init__(self, tab):
         self.tab = tab
         self.tasks = []
+        self.condition = threading.Condition()
 
     def schedule_task(self, task):
+        self.condition.acquire(blocking=True)
         self.tasks.append(task)
+        self.condition.notify_all()
+        self.condition.release()
 
     def run(self):
+        task = None
+        self.condition.acquire(blocking=True)
         if len(self.tasks) > 0:
             task = self.tasks.pop(0)
+        else:
+            self.condition.wait()
+        self.condition.release()
+        if task:
             task.run()
 
 
@@ -1107,6 +1118,7 @@ def paint_visual_effects(node, cmds, rect):
 
 
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type));"
+SETTIMEOUT_JS = "__runSetTimeout(dukpy.handle);"
 RUNTIME_JS = open("browser/runtime.js").read()
 
 
@@ -1119,6 +1131,7 @@ class JSContext:
         self.interp.export_function("querySelectorAll", self.querySelectorAll)
         self.interp.export_function("getAttribute", self.getAttribute)
         self.interp.export_function("innerHTML_set", self.innerHTML_set)
+        self.interp.export_function("setTimeout", self.setTimeout)
         self.node_to_handle = {}
         self.handle_to_node = {}
 
@@ -1177,6 +1190,15 @@ class JSContext:
         if full_url.origin() != self.tab.url.origin():
             raise Exception("Cross-origin XHR request not allowed")
         return out
+
+    def dispatch_settimeout(self, handle):
+        self.interp.evaljs(SETTIMEOUT_JS, handle=handle)
+
+    def setTimeout(self, handle, time):
+        def run_callback():
+            task = Task(self.dispatch_settimeout, handle)
+            self.tab.task_runner.schedule_task(task)
+        threading.Timer(time / 1000.0, run_callback).start()
 
 
 SCROLL_STEP = 100
