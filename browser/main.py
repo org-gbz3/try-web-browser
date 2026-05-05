@@ -534,6 +534,9 @@ def parse_blend_mode(blend_mode_str):
         return skia.BlendMode.kSrcOver  # デフォルトは通常の合成
 
 
+REFRESH_RATE_SEC = .033
+
+
 class Task:
     def __init__(self, task_code, *args):
         self.task_code = task_code
@@ -1681,6 +1684,21 @@ class Browser:
     def handle_quit(self):
         sdl2.SDL_DestroyWindow(self.sdl_window)
 
+    def raster_and_draw(self):
+        self.raster_chrome()
+        self.raster_tab()
+        self.draw()
+
+    def schedule_animation_frame(self):
+
+        def callback():
+            assert self.active_tab is not None
+            active_tab = self.active_tab
+            task = Task(active_tab.render)
+            active_tab.task_runner.schedule_task(task)
+
+        threading.Timer(REFRESH_RATE_SEC, callback).start()
+
 
 def mainloop(browser):
     event = sdl2.SDL_Event()
@@ -1700,6 +1718,8 @@ def mainloop(browser):
             elif event.type == sdl2.SDL_TEXTINPUT:
                 browser.handle_key(event.text.text.decode("utf-8"))
         browser.active_tab.task_runner.run()
+        browser.raster_and_draw()
+        browser.schedule_animation_frame()
 
 
 if __name__ == "__main__":
