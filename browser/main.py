@@ -510,7 +510,7 @@ def parse_color(color):
     elif color in NAMED_COLORS:
         return parse_color(NAMED_COLORS[color])
     else:
-        return skia.ColorBLACK  # デフォルトは黒
+        return skia.ColorGRAY  # デフォルトは灰色
 
 
 DEFAULT_STYLE_SHEET = CSSParser(open("browser/browser.css").read()).parse()
