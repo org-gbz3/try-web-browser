@@ -1119,6 +1119,7 @@ def paint_visual_effects(node, cmds, rect):
 
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type));"
 SETTIMEOUT_JS = "__runSetTimeout(dukpy.handle);"
+XHR_ONLOAD_JS = "__runXHROnload(dukpy.out, dukpy.handle);"
 RUNTIME_JS = open("browser/runtime.js").read()
 
 
@@ -1134,6 +1135,7 @@ class JSContext:
         self.interp.export_function("setTimeout", self.setTimeout)
         self.node_to_handle = {}
         self.handle_to_node = {}
+        self.discarded = False
 
     def run(self, script, code):
         try:
@@ -1181,15 +1183,27 @@ class JSContext:
             print("Error while rendering after innerHTML change: {}".format(e))
             raise e
 
-    def XMLHttpRequest_send(self, method, url, body):
+    def XMLHttpRequest_send(self, method, url, body, isasync, handle):
         full_url = self.tab.url.resolve(url)
+
+        # セキュリティチェック
         if not self.tab.allowed_request(full_url):
             raise Exception(
                 "Cross-origin XHR blocked by CSP: {}".format(full_url))
-        headers, out = full_url.request(self.tab.url, body)
         if full_url.origin() != self.tab.url.origin():
             raise Exception("Cross-origin XHR request not allowed")
-        return out
+
+        def run_load():
+            headers, response = full_url.request(self.tab.url, body)
+            task = Task(self.dispatch_xhr_onload, response, handle)
+            self.tab.task_runner.schedule_task(task)
+            return response
+
+        # 同期リクエストの場合はすぐに実行し、非同期リクエストの場合は別スレッドで実行する
+        if not isasync:
+            return run_load()
+        else:
+            threading.Thread(target=run_load).start()
 
     def dispatch_settimeout(self, handle):
         self.interp.evaljs(SETTIMEOUT_JS, handle=handle)
@@ -1199,6 +1213,12 @@ class JSContext:
             task = Task(self.dispatch_settimeout, handle)
             self.tab.task_runner.schedule_task(task)
         threading.Timer(time / 1000.0, run_callback).start()
+
+    def dispatch_xhr_onload(self, response, handle):
+        if self.discarded:
+            return
+        do_default = self.interp.evaljs(
+            XHR_ONLOAD_JS, out=response, handle=handle)
 
 
 SCROLL_STEP = 100
