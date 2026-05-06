@@ -1179,7 +1179,7 @@ class JSContext:
             child.parent = elt
 
         try:
-            self.tab.render()
+            self.tab.set_needs_render()
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1228,18 +1228,23 @@ SCROLL_STEP = 100
 
 
 class Tab:
-    def __init__(self, tab_height):
+    def __init__(self, browser, tab_height):
         self.scroll = 0
         self.url: URL | None = None
         self.tab_height = tab_height
         self.history = []
         self.focus = None
         self.task_runner = TaskRunner(self)
+        self.needs_render = False
+        self.browser = browser
 
     def click(self, x, y):
         self.focus = None
         assert self.url is not None
         y += self.scroll
+
+        # レイアウトオブジェクトを最新にするためにレンダリングする
+        self.render()
 
         # クリック位置で最後の要素からヒットテスト
         objs = [obj for obj in tree_to_list(self.document, [])
@@ -1263,7 +1268,8 @@ class Tab:
                     self.focus.is_focused = False
                 self.focus = elt
                 elt.is_focused = True
-                return self.render()
+                self.set_needs_render()
+                return
             elif elt.tag == "button":
                 if self.js.dispatch_event("click", elt):
                     return
@@ -1353,15 +1359,22 @@ class Tab:
                 continue
             self.rules.extend(CSSParser(body).parse())
             logging.info("Loaded stylesheet: %s", style_url_s)
-        self.render()
+        self.set_needs_render()
+
+    def set_needs_render(self):
+        self.needs_render = True
 
     def render(self):
+        if not self.needs_render:
+            return
         style(self.nodes, sorted(self.rules, key=cascade_priority))
         self.document = DocumentLayout(self.nodes)
         # print_tree(self.document.node)
         self.document.layout()
         self.display_list = []
         paint_tree(self.document, self.display_list)
+        self.needs_render = False
+        self.browser.set_needs_raster_and_draw()
 
     def scrolldown(self):
         max_y = max(self.document.height + 2 * VSTEP - self.tab_height, 0)
@@ -1378,7 +1391,7 @@ class Tab:
             if self.js.dispatch_event("keydown", self.focus):
                 return
             self.focus.attributes["value"] += char
-            self.render()
+            self.set_needs_render()
 
     def allowed_request(self, url):
         return self.allowed_origins is None or url.origin() in self.allowed_origins
@@ -1536,6 +1549,8 @@ class Chrome:
         if self.focus == "address bar":
             self.browser.active_tab.load(URL(self.address_bar))
             self.focus = None
+            return True
+        return False
 
     def blur(self):
         self.focus = None
@@ -1575,6 +1590,7 @@ class Browser:
         self.chrome_surface = skia.Surface(
             WIDTH, math.ceil(self.chrome.bottom))
         self.tab_surface = None
+        self.need_raster_and_draw = False
 
     def handle_down(self, e):
         assert self.active_tab is not None
@@ -1586,7 +1602,7 @@ class Browser:
         if e.y < self.chrome.bottom:
             self.focus = None
             self.chrome.click(e.x, e.y)
-            self.raster_chrome()
+            self.set_needs_raster_and_draw()
         else:
             self.focus = "content"
             self.chrome.blur()
@@ -1594,7 +1610,7 @@ class Browser:
             self.active_tab.click(e.x, tab_y)
             url = self.active_tab.url
             if self.active_tab.url != url:
-                self.raster_chrome()
+                self.set_needs_raster_and_draw()
             self.raster_tab()
         self.draw()
 
@@ -1656,38 +1672,45 @@ class Browser:
         sdl2.SDL_UpdateWindowSurface(self.sdl_window)
 
     def new_tab(self, url):
-        new_tab = Tab(HEIGHT - self.chrome.bottom)
+        new_tab = Tab(self, HEIGHT - self.chrome.bottom)
         new_tab.load(url)
         self.active_tab = new_tab
         self.tabs.append(new_tab)
+        new_tab.render()
         self.raster_chrome()
         self.raster_tab()
         self.draw()
 
-    def handle_key(self, e):
+    def handle_key(self, char):
         assert self.active_tab is not None
-        if len(e.char) == 0:
+        if len(char) == 0:
             return
-        if not (0x20 <= ord(e.char) <= 0x7E):
+        if not (0x20 <= ord(char) <= 0x7E):
             return
-        if self.chrome.keypress(e.char):
-            self.draw()
+        if self.chrome.keypress(char):
+            self.set_needs_raster_and_draw()
         elif self.focus == "content":
-            self.active_tab.keypress(e.char)
+            self.active_tab.keypress(char)
             self.raster_tab()
             self.draw()
 
     def handle_enter(self, e):
-        self.chrome.enter()
-        self.draw()
+        if self.chrome.enter():
+            self.set_needs_raster_and_draw()
 
     def handle_quit(self):
         sdl2.SDL_DestroyWindow(self.sdl_window)
 
+    def set_needs_raster_and_draw(self):
+        self.need_raster_and_draw = True
+
     def raster_and_draw(self):
+        if not self.need_raster_and_draw:
+            return
         self.raster_chrome()
         self.raster_tab()
         self.draw()
+        self.need_raster_and_draw = False
 
     def schedule_animation_frame(self):
 
