@@ -5,6 +5,7 @@ import logging
 import math
 import socket
 import threading
+import time
 from datetime import datetime
 from urllib.parse import quote, unquote_to_bytes
 from zoneinfo import ZoneInfo
@@ -1131,7 +1132,12 @@ class JSContext:
         self.tab = tab
         self.interp = dukpy.JSInterpreter()
         self.interp.export_function("log", print)
+
+        start = time.perf_counter()
         self.interp.evaljs(RUNTIME_JS)
+        logging.info("JavaScript runtime initialized in %.3f seconds",
+                     time.perf_counter() - start)
+
         self.interp.export_function("querySelectorAll", self.querySelectorAll)
         self.interp.export_function("getAttribute", self.getAttribute)
         self.interp.export_function("innerHTML_set", self.innerHTML_set)
@@ -1224,6 +1230,7 @@ class JSContext:
             return
         do_default = self.interp.evaljs(
             XHR_ONLOAD_JS, out=response, handle=handle)
+        return not do_default
 
     def requestAnimationFrame(self):
         self.tab.browser.set_needs_animation_frame(self.tab)
@@ -1371,6 +1378,7 @@ class Tab:
         self.browser.set_needs_animation_frame(self)
 
     def render(self):
+        start = time.perf_counter()
         self.js.interp.evaljs("__runRAFHandlers();")
         if not self.needs_render:
             return
@@ -1382,6 +1390,8 @@ class Tab:
         paint_tree(self.document, self.display_list)
         self.needs_render = False
         self.browser.set_needs_raster_and_draw()
+        logging.info("Finished render in %.3f seconds",
+                     time.perf_counter() - start)
 
     def scrolldown(self):
         max_y = max(self.document.height + 2 * VSTEP - self.tab_height, 0)
@@ -1716,10 +1726,14 @@ class Browser:
     def raster_and_draw(self):
         if not self.need_raster_and_draw:
             return
+
+        start = time.perf_counter()
         self.raster_chrome()
         self.raster_tab()
         self.draw()
         self.need_raster_and_draw = False
+        logging.info("Finished raster and draw in %.3f seconds",
+                     time.perf_counter() - start)
 
     def schedule_animation_frame(self):
 
