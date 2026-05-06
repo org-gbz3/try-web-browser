@@ -1136,6 +1136,8 @@ class JSContext:
         self.interp.export_function("getAttribute", self.getAttribute)
         self.interp.export_function("innerHTML_set", self.innerHTML_set)
         self.interp.export_function("setTimeout", self.setTimeout)
+        self.interp.export_function(
+            "requestAnimationFrame", self.requestAnimationFrame)
         self.node_to_handle = {}
         self.handle_to_node = {}
         self.discarded = False
@@ -1222,6 +1224,9 @@ class JSContext:
             return
         do_default = self.interp.evaljs(
             XHR_ONLOAD_JS, out=response, handle=handle)
+
+    def requestAnimationFrame(self):
+        self.tab.browser.set_needs_animation_frame(self.tab)
 
 
 SCROLL_STEP = 100
@@ -1363,8 +1368,10 @@ class Tab:
 
     def set_needs_render(self):
         self.needs_render = True
+        self.browser.set_needs_animation_frame(self)
 
     def render(self):
+        self.js.interp.evaljs("__runRAFHandlers();")
         if not self.needs_render:
             return
         style(self.nodes, sorted(self.rules, key=cascade_priority))
@@ -1558,6 +1565,7 @@ class Chrome:
 
 class Browser:
     def __init__(self):
+        self.animation_timer = None
         self.tabs = []
         self.active_tab: Tab | None = None
         self.sdl_window = sdl2.SDL_CreateWindow(
@@ -1591,6 +1599,7 @@ class Browser:
             WIDTH, math.ceil(self.chrome.bottom))
         self.tab_surface = None
         self.need_raster_and_draw = False
+        self.needs_animation_frame = True
 
     def handle_down(self, e):
         assert self.active_tab is not None
@@ -1715,12 +1724,21 @@ class Browser:
     def schedule_animation_frame(self):
 
         def callback():
+            self.animation_timer = None
+            # self.needs_animation_frame = False
             assert self.active_tab is not None
             active_tab = self.active_tab
             task = Task(active_tab.render)
             active_tab.task_runner.schedule_task(task)
 
-        threading.Timer(REFRESH_RATE_SEC, callback).start()
+        # threading.Timer(REFRESH_RATE_SEC, callback).start()
+        if self.needs_animation_frame and not self.animation_timer:
+            self.animation_timer = threading.Timer(REFRESH_RATE_SEC, callback)
+            self.animation_timer.start()
+
+    def set_needs_animation_frame(self, tab):
+        if tab == self.active_tab:
+            self.needs_animation_frame = True
 
 
 def mainloop(browser):
