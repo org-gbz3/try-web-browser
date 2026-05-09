@@ -1281,6 +1281,12 @@ class Tab:
         self.task_runner.start_thread()
         self.needs_render = False
         self.browser = browser
+        self.scroll_changed_in_tab = False
+
+    def clamp_scroll(self, scroll):
+        height = math.ceil(self.document.height + 2 * VSTEP)
+        maxscroll = height - self.tab_height
+        return max(0, min(scroll, maxscroll))
 
     def click(self, x, y):
         self.focus = None
@@ -1348,6 +1354,7 @@ class Tab:
         headers, body = url.request(self.url, payload)
         self.history.append(url)
         self.url = url
+        self.scroll_changed_in_tab = True
         logging.info("Received response: %d bytes", len(body))
 
         self.nodes = HTMLParser(body).parse()
@@ -1418,6 +1425,12 @@ class Tab:
         self.document = DocumentLayout(self.nodes)
         # print_tree(self.document.node)
         self.document.layout()
+
+        clamped_scroll = self.clamp_scroll(self.scroll)
+        if clamped_scroll != self.scroll:
+            self.scroll_changed_in_tab = True
+        self.scroll = clamped_scroll
+
         self.display_list = []
         paint_tree(self.document, self.display_list)
         self.needs_render = False
@@ -1445,15 +1458,22 @@ class Tab:
     def allowed_request(self, url):
         return self.allowed_origins is None or url.origin() in self.allowed_origins
 
-    def run_animation_frame(self):
+    def run_animation_frame(self, scroll):
+        if not self.scroll_changed_in_tab:
+            self.scroll = scroll
         self.js.interp.evaljs("__runRAFHandlers();")
         self.render()
+
         document_height = math.ceil(self.document.height + 2 * VSTEP)
+        scroll = None
+        if self.scroll_changed_in_tab:
+            scroll = self.scroll
         commit_data = CommitData(
-            self.url, self.scroll, document_height, self.display_list
+            self.url, scroll, document_height, self.display_list
         )
         self.display_list = []
         self.browser.commit(self, commit_data)
+        self.scroll_changed_in_tab = False
 
 
 class Chrome:
@@ -1667,12 +1687,22 @@ class Browser:
         self.active_tab_height = 0
         self.active_tab_display_list = None
 
+    def clamp_scroll(self, scroll):
+        height = self.active_tab_height
+        max_scroll = height - (HEIGHT - self.chrome.bottom)
+        return max(0, min(scroll, max_scroll))
+
     def handle_down(self, e):
         assert self.active_tab is not None
 
         self.lock.acquire(blocking=True)
-        self.active_tab.scrolldown()
-        self.draw()
+        if not self.active_tab_height:
+            self.lock.release()
+            return
+        self.active_tab_scroll = self.clamp_scroll(
+            self.active_tab_scroll + SCROLL_STEP)
+        self.set_needs_raster_and_draw()
+        self.needs_animation_frame = True
         self.lock.release()
 
     def handle_click(self, e):
@@ -1767,6 +1797,7 @@ class Browser:
     def set_active_tab(self, tab):
         self.active_tab = tab
         self.active_tab_scroll = 0
+        self.active_tab_url = None
         self.needs_animation_frame = True
         self.animation_timer = None
 
@@ -1819,13 +1850,13 @@ class Browser:
 
         def callback():
             self.lock.acquire(blocking=True)
-            self.animation_timer = None
-            # self.needs_animation_frame = False
+            # self.animation_timer = None
+            scroll = self.active_tab_scroll
+            self.needs_animation_frame = False
             assert self.active_tab is not None
-            active_tab = self.active_tab
+            task = Task(self.active_tab.run_animation_frame, scroll)
+            self.active_tab.task_runner.schedule_task(task)
             self.lock.release()
-            task = Task(self.active_tab.run_animation_frame)
-            active_tab.task_runner.schedule_task(task)
 
         self.lock.acquire(blocking=True)
         if self.needs_animation_frame and not self.animation_timer:
@@ -1849,7 +1880,8 @@ class Browser:
         self.lock.acquire(blocking=True)
         if tab == self.active_tab:
             self.active_tab_url = data.url
-            self.active_tab_scroll = data.scroll
+            if data.scroll is not None:
+                self.active_tab_scroll = data.scroll
             self.active_tab_height = data.height
             if data.display_list:
                 self.active_tab_display_list = data.display_list
