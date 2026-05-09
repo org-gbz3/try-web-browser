@@ -547,7 +547,8 @@ class Task:
         assert self.task_code is not None, "Task has already been run"
         assert self.args is not None, "Task has already been run"
         result = self.task_code(*self.args)
-        print("Script returned: ", result)
+        if result is not None:
+            logging.info("Script returned: %s", result)
         self.task_code = None
         self.args = None
 
@@ -561,6 +562,7 @@ class TaskRunner:
             target=self.run,
             name="Main thread",
         )
+        self.needs_quit = False
 
     def schedule_task(self, task):
         self.condition.acquire(blocking=True)
@@ -1276,6 +1278,7 @@ class Tab:
         self.history = []
         self.focus = None
         self.task_runner = TaskRunner(self)
+        self.task_runner.start_thread()
         self.needs_render = False
         self.browser = browser
 
@@ -1407,10 +1410,10 @@ class Tab:
         self.browser.set_needs_animation_frame(self)
 
     def render(self):
-        start = time.perf_counter()
-        self.js.interp.evaljs("__runRAFHandlers();")
         if not self.needs_render:
             return
+
+        start = time.perf_counter()
         style(self.nodes, sorted(self.rules, key=cascade_priority))
         self.document = DocumentLayout(self.nodes)
         # print_tree(self.document.node)
@@ -1441,6 +1444,16 @@ class Tab:
 
     def allowed_request(self, url):
         return self.allowed_origins is None or url.origin() in self.allowed_origins
+
+    def run_animation_frame(self):
+        self.js.interp.evaljs("__runRAFHandlers();")
+        self.render()
+        document_height = math.ceil(self.document.height + 2 * VSTEP)
+        commit_data = CommitData(
+            self.url, self.scroll, document_height, self.display_list
+        )
+        self.display_list = []
+        self.browser.commit(self, commit_data)
 
 
 class Chrome:
@@ -1582,7 +1595,7 @@ class Chrome:
         else:
             for i, tab in enumerate(self.browser.tabs):
                 if self.tab_rect(i).contains(x, y):
-                    self.browser.active_tab = tab
+                    self.browser.set_active_tab(tab)
                     break
 
     def keypress(self, char):
@@ -1600,6 +1613,14 @@ class Chrome:
 
     def blur(self):
         self.focus = None
+
+
+class CommitData:
+    def __init__(self, url, scroll, height, display_list):
+        self.url = url
+        self.scroll = scroll
+        self.height = height
+        self.display_list = display_list
 
 
 class Browser:
@@ -1641,14 +1662,23 @@ class Browser:
         self.need_raster_and_draw = False
         self.needs_animation_frame = True
         threading.current_thread().name = "Browser thread"
+        self.active_tab_url = None
+        self.active_tab_scroll = 0
+        self.active_tab_height = 0
+        self.active_tab_display_list = None
 
     def handle_down(self, e):
         assert self.active_tab is not None
+
+        self.lock.acquire(blocking=True)
         self.active_tab.scrolldown()
         self.draw()
+        self.lock.release()
 
     def handle_click(self, e):
         assert self.active_tab is not None
+
+        self.lock.acquire(blocking=True)
         if e.y < self.chrome.bottom:
             self.focus = None
             self.chrome.click(e.x, e.y)
@@ -1661,15 +1691,19 @@ class Browser:
             self.active_tab.task_runner.schedule_task(task)
 
         self.draw()
+        self.lock.release()
 
     def raster_tab(self):
-        assert self.active_tab is not None
-        tab_height = math.ceil(self.active_tab.document.height + 2 * VSTEP)
+        if self.active_tab_height is None:
+            return
+        tab_height = math.ceil(self.active_tab_height + 2 * VSTEP)
         if not self.tab_surface or tab_height != self.tab_surface.height():
             self.tab_surface = skia.Surface(WIDTH, tab_height)
         canvas = self.tab_surface.getCanvas()
         canvas.clear(skia.ColorWHITE)
-        self.active_tab.raster(canvas)
+        if self.active_tab_display_list:
+            for cmd in self.active_tab_display_list:
+                cmd.execute(canvas)
 
     def raster_chrome(self):
         canvas = self.chrome_surface.getCanvas()
@@ -1686,7 +1720,7 @@ class Browser:
 
         # タブとクロームを合成
         tab_rect = skia.Rect.MakeLTRB(0, self.chrome.bottom, WIDTH, HEIGHT)
-        tab_offset = self.chrome.bottom - self.active_tab.scroll
+        tab_offset = self.chrome.bottom - self.active_tab_scroll
         canvas.save()
         canvas.clipRect(tab_rect)
         canvas.translate(0, tab_offset)
@@ -1732,22 +1766,32 @@ class Browser:
 
     def set_active_tab(self, tab):
         self.active_tab = tab
+        self.active_tab_scroll = 0
+        self.needs_animation_frame = True
+        self.animation_timer = None
 
     def handle_key(self, char):
         assert self.active_tab is not None
+
+        self.lock.acquire(blocking=True)
         if len(char) == 0:
+            self.lock.release()
             return
         if not (0x20 <= ord(char) <= 0x7E):
+            self.lock.release()
             return
         if self.chrome.keypress(char):
             self.set_needs_raster_and_draw()
         elif self.focus == "content":
             task = Task(self.active_tab.keypress, char)
             self.active_tab.task_runner.schedule_task(task)
+        self.lock.release()
 
     def handle_enter(self, e):
+        self.lock.acquire(blocking=True)
         if self.chrome.enter():
             self.set_needs_raster_and_draw()
+        self.lock.release()
 
     def handle_quit(self):
         for tab in self.tabs:
@@ -1761,38 +1805,57 @@ class Browser:
         if not self.need_raster_and_draw:
             return
 
-        start = time.perf_counter()
+        self.lock.acquire(blocking=True)
+        # start = time.perf_counter()
         self.raster_chrome()
         self.raster_tab()
         self.draw()
         self.need_raster_and_draw = False
-        logging.info("Finished raster and draw in %.3f seconds",
-                     time.perf_counter() - start)
+        # logging.info("Finished raster and draw in %.3f seconds",
+        #              time.perf_counter() - start)
+        self.lock.release()
 
     def schedule_animation_frame(self):
 
         def callback():
+            self.lock.acquire(blocking=True)
             self.animation_timer = None
             # self.needs_animation_frame = False
             assert self.active_tab is not None
             active_tab = self.active_tab
-            task = Task(active_tab.render)
+            self.lock.release()
+            task = Task(self.active_tab.run_animation_frame)
             active_tab.task_runner.schedule_task(task)
 
-        # threading.Timer(REFRESH_RATE_SEC, callback).start()
+        self.lock.acquire(blocking=True)
         if self.needs_animation_frame and not self.animation_timer:
             self.animation_timer = threading.Timer(REFRESH_RATE_SEC, callback)
             self.animation_timer.start()
+        self.lock.release()
 
     def set_needs_animation_frame(self, tab):
+        self.lock.acquire(blocking=True)
         if tab == self.active_tab:
             self.needs_animation_frame = True
+        self.lock.release()
 
     def schedule_load(self, url, body=None):
         assert self.active_tab is not None
         self.active_tab.task_runner.clear_pending_tasks()
         task = Task(self.active_tab.load, url, body)
         self.active_tab.task_runner.schedule_task(task)
+
+    def commit(self, tab, data):
+        self.lock.acquire(blocking=True)
+        if tab == self.active_tab:
+            self.active_tab_url = data.url
+            self.active_tab_scroll = data.scroll
+            self.active_tab_height = data.height
+            if data.display_list:
+                self.active_tab_display_list = data.display_list
+            self.animation_timer = None
+            self.set_needs_raster_and_draw()
+        self.lock.release()
 
 
 def mainloop(browser):
