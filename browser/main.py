@@ -1162,7 +1162,8 @@ class JSContext:
     def __init__(self, tab):
         self.tab = tab
         self.interp = dukpy.JSInterpreter()
-        self.interp.export_function("log", print)
+        # self.interp.export_function("log", print)
+        self.interp.export_function("log", self.console_log)
 
         start = time.perf_counter()
         self.interp.evaljs(RUNTIME_JS)
@@ -1175,9 +1176,13 @@ class JSContext:
         self.interp.export_function("setTimeout", self.setTimeout)
         self.interp.export_function(
             "requestAnimationFrame", self.requestAnimationFrame)
+        self.interp.export_function("style_set", self.style_set)
         self.node_to_handle = {}
         self.handle_to_node = {}
         self.discarded = False
+
+    def console_log(self, log_text):
+        logging.info("[console] " + log_text)
 
     def run(self, script, code):
         try:
@@ -1265,6 +1270,11 @@ class JSContext:
 
     def requestAnimationFrame(self):
         self.tab.browser.set_needs_animation_frame(self.tab)
+
+    def style_set(self, handle, s):
+        elt = self.handle_to_node[handle]
+        elt.attributes["style"] = s
+        self.tab.set_needs_render()
 
 
 SCROLL_STEP = 100
@@ -1606,9 +1616,14 @@ class Chrome:
     def click(self, x, y):
         self.focus = None
         if self.newtab_rect.contains(x, y):
-            self.browser.new_tab_internal(URL("https://browser.engineering/"))
+            task = Task(
+                self.browser.new_tab_internal,
+                URL("https://browser.engineering/"),
+            )
+            self.browser.active_tab.task_runner.schedule_task(task)
         elif self.back_rect.contains(x, y):
-            self.browser.active_tab.go_back()
+            task = Task(self.browser.active_tab.go_back)
+            self.browser.active_tab.task_runner.schedule_task(task)
         elif self.address_rect.contains(x, y):
             self.focus = "address bar"
             self.address_bar = ""
@@ -1719,8 +1734,6 @@ class Browser:
             tab_y = e.y - self.chrome.bottom
             task = Task(self.active_tab.click, e.x, tab_y)
             self.active_tab.task_runner.schedule_task(task)
-
-        self.draw()
         self.lock.release()
 
     def raster_tab(self):
@@ -1795,6 +1808,7 @@ class Browser:
         self.schedule_load(url)
 
     def set_active_tab(self, tab):
+        logging.info("Switching to tab with URL: %s", tab.url)
         self.active_tab = tab
         self.active_tab_scroll = 0
         self.active_tab_url = None
@@ -1837,13 +1851,13 @@ class Browser:
             return
 
         self.lock.acquire(blocking=True)
-        # start = time.perf_counter()
+        start = time.perf_counter()
         self.raster_chrome()
         self.raster_tab()
         self.draw()
         self.need_raster_and_draw = False
-        # logging.info("Finished raster and draw in %.3f seconds",
-        #              time.perf_counter() - start)
+        logging.info("Finished raster and draw in %.3f seconds",
+                     time.perf_counter() - start)
         self.lock.release()
 
     def schedule_animation_frame(self):

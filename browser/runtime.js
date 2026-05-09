@@ -38,6 +38,12 @@ Object.defineProperty(Node.prototype, "innerHTML", {
     }
 });
 
+Object.defineProperty(Node.prototype, "style", {
+    set: function (style) {
+        call_python("style_set", this.handle, style.toString());
+    }
+});
+
 function Event(type) {
     this.type = type;
     this.do_default = true;
