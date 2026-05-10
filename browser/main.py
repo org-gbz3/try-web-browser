@@ -1073,8 +1073,18 @@ class InputLayout:
         return cmds
 
 
-class DrawText:
+class PaintCommand:
+    def __init__(self, rect):
+        self.rect = rect
+        self.children = []
+
+
+class DrawText(PaintCommand):
     def __init__(self, x1, y1, text, font, color):
+        super().__init__(skia.Rect.MakeLTRB(x1, y1,
+                                            x1 + font.measureText(text),
+                                            y1 + linespace(font))
+                         )
         self.text = text
         self.font = font
         self.top = y1
@@ -1098,8 +1108,9 @@ class DrawText:
         return "DrawText(text={})".format(self.text)
 
 
-class DrawRect:
+class DrawRect(PaintCommand):
     def __init__(self, rect, color):
+        super().__init__(rect)
         self.color = color
         self.rect = rect
         self.children = []
@@ -1118,8 +1129,9 @@ class DrawRect:
         )
 
 
-class DrawRRect:
+class DrawRRect(PaintCommand):
     def __init__(self, rect, radius, color):
+        super().__init__(rect)
         self.color = color
         self.rect = rect
         self.rrect = skia.RRect.MakeRectXY(rect, radius, radius)
@@ -1129,8 +1141,9 @@ class DrawRRect:
         canvas.drawRRect(self.rrect, paint=skia.Paint(Color=sk_color))
 
 
-class DrawLine:
+class DrawLine(PaintCommand):
     def __init__(self, x1, y1, x2, y2, color, thickness):
+        super().__init__(skia.Rect.MakeLTRB(x1, y1, x2, y2))
         self.rect = skia.Rect.MakeLTRB(x1, y1, x2, y2)
         self.color = color
         self.thickness = thickness
@@ -1149,8 +1162,9 @@ class DrawLine:
         canvas.drawPath(path, paint)
 
 
-class DrawOutline:
+class DrawOutline(PaintCommand):
     def __init__(self, rect, color, thickness):
+        super().__init__(rect)
         self.rect = rect
         self.color = color
         self.thickness = thickness
@@ -1164,10 +1178,34 @@ class DrawOutline:
         canvas.drawRect(self.rect, paint)
 
 
-class Blend:
-    def __init__(self, opacity, blend_mode, children):
+class DrawCompositedLayer(PaintCommand):
+    def __init__(self, composited_layer):
+        self.composited_layer = composited_layer
+        super().__init__(composited_layer.composited_bounds())
+
+    def execute(self, canvas):
+        layer = self.composited_layer
+        bounds = layer.composited_bounds()
+        layer.surface.draw(canvas, bounds.left(), bounds.top())
+
+    def __repr__(self):
+        return "DrawCompositedLayer()"
+
+
+class VisualEffect:
+    def __init__(self, rect, children, node=None):
+        self.rect = rect.makeOffset(0.0, 0.0)
+        self.children = children
+        for child in self.children:
+            self.rect.join(child.rect)
+
+
+class Blend(VisualEffect):
+    def __init__(self, opacity, blend_mode, node, children):
+        super().__init__(skia.Rect.MakeEmpty(), children, node)
         self.opacity = opacity
         self.blend_mode = blend_mode
+        self.node = node
         self.should_save = self.blend_mode or self.opacity < 1
         self.children = children
         self.rect = skia.Rect.MakeEmpty()
@@ -1196,6 +1234,9 @@ class Blend:
             args = ", <no-op>"
         return "Blend({})".format(args[2:])
 
+    def clone(self, child):
+        return Blend(self.opacity, self.blend_mode, self.node, [child])
+
 
 def paint_tree(layout_object, display_list):
     cmds = []
@@ -1217,9 +1258,50 @@ def paint_visual_effects(node, cmds, rect):
             blend_mode = "source-over"
         border_radius = float(node.style.get("border-radius", "0px")[:-2])
         cmds.append(
-            Blend(1.0, "destination-in", [DrawRRect(rect, border_radius, "white")]))
+            Blend(1.0, "destination-in", node, [DrawRRect(rect, border_radius, "white")]))
 
-    return [Blend(opacity, blend_mode, cmds)]
+    return [Blend(opacity, blend_mode, node, cmds)]
+
+
+def add_parent_pointers(nodes, parent=None):
+    for node in nodes:
+        node.parent = parent
+        add_parent_pointers(node.children, node)
+
+
+class CompositedLayer:
+    def __init__(self, skia_context, display_item):
+        self.skia_context = skia_context
+        self.surface = None
+        self.display_items = [display_item]
+
+    def composited_bounds(self):
+        rect = skia.Rect.MakeEmpty()
+        for item in self.display_items:
+            rect.join(item.rect)
+        rect.outset(1, 1)  # アンチエイリアスのために少し余白を追加
+        return rect
+
+    def raster(self):
+        bounds = self.composited_bounds()
+        if bounds.isEmpty():
+            return
+        irect = bounds.roundOut()
+
+        if not self.surface:
+            self.surface = skia.Surface.MakeRenderTarget(
+                self.skia_context,
+                skia.Budgeted.kNo,
+                skia.ImageInfo.MakeN32Premul(irect.width(), irect.height()),
+            )
+            assert self.surface, "Failed to create surface for composited layer"
+        canvas = self.surface.getCanvas()
+        canvas.clear(skia.ColorTRANSPARENT)
+        canvas.save()
+        canvas.translate(-bounds.left(), -bounds.top())
+        for item in self.display_items:
+            item.execute(canvas)
+        canvas.restore()
 
 
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type));"
@@ -1515,12 +1597,12 @@ class Tab:
         self.display_list = []
         paint_tree(self.document, self.display_list)
         self.needs_render = False
-        self.browser.set_needs_raster_and_draw()
+        self.browser.set_needs_composite_raster_and_draw()
         logging.info("Finished render in %.3f seconds",
                      time.perf_counter() - start)
         self.browser.measure.stop("render")
-        for item in self.display_list:
-            print_tree(item)
+        # for item in self.display_list:
+        #     print_tree(item)
 
     def scrolldown(self):
         max_y = max(self.document.height + 2 * VSTEP - self.tab_height, 0)
@@ -1788,14 +1870,16 @@ class Browser:
         assert self.chrome_surface is not None, "Failed to create Skia surface for chrome"
 
         self.tab_surface = None
-        self.need_raster_and_draw = False
+        self.need_composite_raster_and_draw = False
         self.needs_animation_frame = True
         threading.current_thread().name = "Browser thread"
         self.active_tab_url = None
         self.active_tab_scroll = 0
         self.active_tab_height = 0
-        self.active_tab_display_list = None
+        self.active_tab_display_list = []
         self.measure = MeasureTime()
+        self.composited_layers = []
+        self.draw_list = []
 
     def clamp_scroll(self, scroll):
         height = self.active_tab_height
@@ -1811,7 +1895,7 @@ class Browser:
             return
         self.active_tab_scroll = self.clamp_scroll(
             self.active_tab_scroll + SCROLL_STEP)
-        self.set_needs_raster_and_draw()
+        self.set_needs_composite_raster_and_draw()
         self.needs_animation_frame = True
         self.lock.release()
 
@@ -1822,7 +1906,7 @@ class Browser:
         if e.y < self.chrome.bottom:
             self.focus = None
             self.chrome.click(e.x, e.y)
-            self.set_needs_raster_and_draw()
+            self.set_needs_composite_raster_and_draw()
         else:
             self.focus = "content"
             self.chrome.blur()
@@ -1832,23 +1916,8 @@ class Browser:
         self.lock.release()
 
     def raster_tab(self):
-        if self.active_tab_height is None:
-            return
-        tab_height = math.ceil(self.active_tab_height + 2 * VSTEP)
-        if not self.tab_surface or tab_height != self.tab_surface.height():
-            self.tab_surface = skia.Surface(WIDTH, tab_height)
-            self.tab_surface = skia.Surface.MakeRenderTarget(
-                self.skia_context,
-                skia.Budgeted.kNo,
-                skia.ImageInfo.MakeN32Premul(WIDTH, tab_height)
-            )
-        assert self.tab_surface is not None, "Failed to create Skia surface for tab content"
-
-        canvas = self.tab_surface.getCanvas()
-        canvas.clear(skia.ColorWHITE)
-        if self.active_tab_display_list:
-            for cmd in self.active_tab_display_list:
-                cmd.execute(canvas)
+        for composited_layer in self.composited_layers:
+            composited_layer.raster()
 
     def raster_chrome(self):
         canvas = self.chrome_surface.getCanvas()
@@ -1858,18 +1927,17 @@ class Browser:
 
     def draw(self):
         assert self.active_tab is not None
-        assert self.tab_surface is not None
 
         canvas = self.root_surface.getCanvas()
         canvas.clear(skia.ColorWHITE)
 
         # タブとクロームを合成
         tab_rect = skia.Rect.MakeLTRB(0, self.chrome.bottom, WIDTH, HEIGHT)
-        tab_offset = self.chrome.bottom - self.active_tab_scroll
         canvas.save()
         canvas.clipRect(tab_rect)
-        canvas.translate(0, tab_offset)
-        self.tab_surface.draw(canvas, 0, 0)
+        canvas.translate(0, self.chrome.bottom - self.active_tab_scroll)
+        for item in self.draw_list:
+            item.execute(canvas)
         canvas.restore()
         chrome_rect = skia.Rect.MakeLTRB(0, 0, WIDTH, self.chrome.bottom)
         canvas.save()
@@ -1910,7 +1978,7 @@ class Browser:
             self.lock.release()
             return
         if self.chrome.keypress(char):
-            self.set_needs_raster_and_draw()
+            self.set_needs_composite_raster_and_draw()
         elif self.focus == "content":
             task = Task(self.active_tab.keypress, char)
             self.active_tab.task_runner.schedule_task(task)
@@ -1919,7 +1987,7 @@ class Browser:
     def handle_enter(self, e):
         self.lock.acquire(blocking=True)
         if self.chrome.enter():
-            self.set_needs_raster_and_draw()
+            self.set_needs_composite_raster_and_draw()
         self.lock.release()
 
     def handle_quit(self):
@@ -1929,20 +1997,22 @@ class Browser:
         sdl2.SDL_GL_DeleteContext(self.gl_context)
         sdl2.SDL_DestroyWindow(self.sdl_window)
 
-    def set_needs_raster_and_draw(self):
-        self.need_raster_and_draw = True
+    def set_needs_composite_raster_and_draw(self):
+        self.need_composite_raster_and_draw = True
 
-    def raster_and_draw(self):
-        if not self.need_raster_and_draw:
+    def composite_raster_and_draw(self):
+        if not self.need_composite_raster_and_draw:
             return
 
         self.lock.acquire(blocking=True)
         self.measure.time("raster_and_draw")
         start = time.perf_counter()
+        self.composite()
         self.raster_chrome()
         self.raster_tab()
+        self.paint_draw_list()
         self.draw()
-        self.need_raster_and_draw = False
+        self.need_composite_raster_and_draw = False
         logging.info("Finished raster and draw in %.3f seconds",
                      time.perf_counter() - start)
         self.measure.stop("raster_and_draw")
@@ -1988,8 +2058,42 @@ class Browser:
             if data.display_list:
                 self.active_tab_display_list = data.display_list
             self.animation_timer = None
-            self.set_needs_raster_and_draw()
+            self.set_needs_composite_raster_and_draw()
         self.lock.release()
+
+    def composite(self):
+        assert self.active_tab_display_list is not None
+
+        add_parent_pointers(self.active_tab_display_list)
+        self.composited_layers = []
+        all_commands = []
+        for cmd in self.active_tab_display_list:
+            all_commands = tree_to_list(cmd, all_commands)
+        paint_commands = [
+            cmd for cmd in all_commands if isinstance(cmd, PaintCommand)
+        ]
+        for cmd in paint_commands:
+            layer = CompositedLayer(self.skia_context, cmd)
+            self.composited_layers.append(layer)
+
+    def paint_draw_list(self):
+        new_effects = {}
+        self.draw_list = []
+        for composited_layer in self.composited_layers:
+            current_effect = DrawCompositedLayer(composited_layer)
+            if not composited_layer.display_items:
+                continue
+            parent = composited_layer.display_items[0].parent
+            while parent:
+                if parent in new_effects:
+                    new_parent = new_effects[parent]
+                    new_parent.children.append(current_effect)
+                    break
+                else:
+                    current_effect = parent.clone(current_effect)
+                    new_effects[parent] = current_effect
+                    parent = parent.parent
+            self.draw_list.append(current_effect)
 
 
 def mainloop(browser):
@@ -2009,7 +2113,7 @@ def mainloop(browser):
                     browser.handle_down(event.key)
             elif event.type == sdl2.SDL_TEXTINPUT:
                 browser.handle_key(event.text.text.decode("utf-8"))
-        browser.raster_and_draw()
+        browser.composite_raster_and_draw()
         browser.schedule_animation_frame()
 
 
