@@ -11,6 +11,7 @@ from urllib.parse import quote, unquote_to_bytes
 from zoneinfo import ZoneInfo
 
 import dukpy
+import OpenGL.GL
 import sdl2
 import skia
 
@@ -1719,16 +1720,30 @@ class Browser:
             sdl2.SDL_WINDOWPOS_CENTERED,
             WIDTH,
             HEIGHT,
-            sdl2.SDL_WINDOW_SHOWN
+            sdl2.SDL_WINDOW_SHOWN | sdl2.SDL_WINDOW_OPENGL,
         )
-        self.root_surface = skia.Surface.MakeRaster(
-            skia.ImageInfo.Make(
+        self.gl_context = sdl2.SDL_GL_CreateContext(self.sdl_window)
+        print("OpenGL initialized: vendor={},renderer={}".format(
+            OpenGL.GL.glGetString(OpenGL.GL.GL_VENDOR),
+            OpenGL.GL.glGetString(OpenGL.GL.GL_RENDERER),
+        ))
+        self.skia_context = skia.GrDirectContext.MakeGL()
+
+        self.root_surface = skia.Surface.MakeFromBackendRenderTarget(
+            self.skia_context,
+            skia.GrBackendRenderTarget(
                 WIDTH,
                 HEIGHT,
-                ct=skia.kRGBA_8888_ColorType,
-                at=skia.kUnpremul_AlphaType,
-            )
+                0,  # sample count
+                0,  # stencil bits
+                skia.GrGLFramebufferInfo(0, OpenGL.GL.GL_RGBA8),
+            ),
+            skia.kBottomLeft_GrSurfaceOrigin,
+            skia.kRGBA_8888_ColorType,
+            skia.ColorSpace.MakeSRGB()
         )
+        assert self.root_surface is not None, "Failed to create Skia surface from OpenGL context"
+
         self.chrome = Chrome(self)
         if sdl2.SDL_BYTEORDER == sdl2.SDL_BIG_ENDIAN:
             self.RED_MASK = 0xff000000
@@ -1740,8 +1755,14 @@ class Browser:
             self.GREEN_MASK = 0x0000ff00
             self.BLUE_MASK = 0x00ff0000
             self.ALPHA_MASK = 0xff000000
-        self.chrome_surface = skia.Surface(
-            WIDTH, math.ceil(self.chrome.bottom))
+
+        self.chrome_surface = skia.Surface.MakeRenderTarget(
+            self.skia_context,
+            skia.Budgeted.kNo,
+            skia.ImageInfo.MakeN32Premul(WIDTH, math.ceil(self.chrome.bottom))
+        )
+        assert self.chrome_surface is not None, "Failed to create Skia surface for chrome"
+
         self.tab_surface = None
         self.need_raster_and_draw = False
         self.needs_animation_frame = True
@@ -1792,6 +1813,13 @@ class Browser:
         tab_height = math.ceil(self.active_tab_height + 2 * VSTEP)
         if not self.tab_surface or tab_height != self.tab_surface.height():
             self.tab_surface = skia.Surface(WIDTH, tab_height)
+            self.tab_surface = skia.Surface.MakeRenderTarget(
+                self.skia_context,
+                skia.Budgeted.kNo,
+                skia.ImageInfo.MakeN32Premul(WIDTH, tab_height)
+            )
+        assert self.tab_surface is not None, "Failed to create Skia surface for tab content"
+
         canvas = self.tab_surface.getCanvas()
         canvas.clear(skia.ColorWHITE)
         if self.active_tab_display_list:
@@ -1825,26 +1853,8 @@ class Browser:
         self.chrome_surface.draw(canvas, 0, 0)
         canvas.restore()
 
-        skia_image = self.root_surface.makeImageSnapshot()
-        skia_bytes = skia_image.tobytes()
-        depth = 32  # ピクセルごとのビット数（４バイト）
-        pitch = WIDTH * depth // 8  # 1行あたりのバイト
-        sdl_surface = sdl2.SDL_CreateRGBSurfaceFrom(
-            skia_bytes,
-            WIDTH,
-            HEIGHT,
-            depth,
-            pitch,
-            self.RED_MASK,
-            self.GREEN_MASK,
-            self.BLUE_MASK,
-            self.ALPHA_MASK,
-        )
-        rect = sdl2.SDL_Rect(0, 0, WIDTH, HEIGHT)
-        window_surface = sdl2.SDL_GetWindowSurface(self.sdl_window)
-        # 実際にコピーを行っているのは SDL_BlitSurface です
-        sdl2.SDL_BlitSurface(sdl_surface, rect, window_surface, rect)
-        sdl2.SDL_UpdateWindowSurface(self.sdl_window)
+        self.root_surface.flushAndSubmit()
+        sdl2.SDL_GL_SwapWindow(self.sdl_window)
 
     def new_tab(self, url):
         self.lock.acquire(blocking=True)
@@ -1892,6 +1902,7 @@ class Browser:
         for tab in self.tabs:
             tab.task_runner.set_needs_quit()
         self.measure.finish()
+        sdl2.SDL_GL_DeleteContext(self.gl_context)
         sdl2.SDL_DestroyWindow(self.sdl_window)
 
     def set_needs_raster_and_draw(self):
