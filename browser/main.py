@@ -1083,6 +1083,7 @@ class DrawText:
         self.bottom = y1 + linespace(font)
         self.rect = skia.Rect.MakeLTRB(x1, y1, self.right, self.bottom)
         self.color = color
+        self.children = []
 
     def execute(self, canvas):
         paint = skia.Paint(
@@ -1093,17 +1094,28 @@ class DrawText:
         canvas.drawString(self.text, float(self.left),
                           baseline, self.font, paint)
 
+    def __repr__(self):
+        return "DrawText(text={})".format(self.text)
+
 
 class DrawRect:
     def __init__(self, rect, color):
         self.color = color
         self.rect = rect
+        self.children = []
 
     def execute(self, canvas):
         paint = skia.Paint(
             Color=parse_color(self.color),
         )
         canvas.drawRect(self.rect, paint)
+
+    def __repr__(self):
+        return (
+            "DrawRect(top={}, left={}, bottom={}, right={}, color={})".format(
+                self.rect.top(), self.rect.left(), self.rect.bottom(), self.rect.right(), self.color
+            )
+        )
 
 
 class DrawRRect:
@@ -1173,6 +1185,16 @@ class Blend:
             cmd.execute(canvas)
         if self.should_save:
             canvas.restore()
+
+    def __repr__(self) -> str:
+        args = ""
+        if self.opacity < 1:
+            args += "opacity={}, ".format(self.opacity)
+        if self.blend_mode:
+            args += "blend_mode='{}', ".format(self.blend_mode)
+        if not args:
+            args = ", <no-op>"
+        return "Blend({})".format(args[2:])
 
 
 def paint_tree(layout_object, display_list):
@@ -1497,6 +1519,8 @@ class Tab:
         logging.info("Finished render in %.3f seconds",
                      time.perf_counter() - start)
         self.browser.measure.stop("render")
+        for item in self.display_list:
+            print_tree(item)
 
     def scrolldown(self):
         max_y = max(self.document.height + 2 * VSTEP - self.tab_height, 0)
