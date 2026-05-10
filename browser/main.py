@@ -538,6 +538,53 @@ def parse_blend_mode(blend_mode_str):
 REFRESH_RATE_SEC = .033
 
 
+class MeasureTime:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.file = open("browser.trace", "w")
+        self.file.write('{"traceEvents":[')
+        ts = time.time() * 1000000
+        self.file.write(
+            '{"name":"process_name","ph":"M","ts":%s,"pid":1,"cat":"__metadata","args":{"name":"Browser"}}' % str(
+                ts)
+        )
+        self.file.flush()
+
+    def time(self, name):
+        self.lock.acquire(blocking=True)
+        ts = time.time() * 1000000
+        tid = threading.get_ident()
+        self.file.write(
+            ',{"ph":"B","cat":"_","name":"%s","ts":%s,"pid":1,"tid":%s}' % (
+                name, str(ts), str(tid))
+        )
+        self.file.flush()
+        self.lock.release()
+
+    def stop(self, name):
+        self.lock.acquire(blocking=True)
+        ts = time.time() * 1000000
+        tid = threading.get_ident()
+        self.file.write(
+            ',{"ph":"E","cat":"_","name":"%s","ts":%s,"pid":1,"tid":%s}' % (
+                name, str(ts), str(tid))
+        )
+        self.file.flush()
+        self.lock.release()
+
+    def finish(self):
+        self.lock.acquire(blocking=True)
+        for thread in threading.enumerate():
+            self.file.write(
+                ',{"ph":"M","name":"thread_name","pid":1,"tid":%s,"args":{"name":"%s"}}' % (
+                    str(thread.ident), thread.name)
+            )
+        self.file.write(']}')
+        self.file.flush()
+        self.file.close()
+        self.lock.release()
+
+
 class Task:
     def __init__(self, task_code, *args):
         self.task_code = task_code
@@ -1132,7 +1179,7 @@ def paint_tree(layout_object, display_list):
     if layout_object.should_paint():
         cmds = layout_object.paint()
     for child in layout_object.children:
-        paint_tree(child, display_list)
+        paint_tree(child, cmds)
 
     if layout_object.should_paint():
         cmds = layout_object.paint_effects(cmds)
@@ -1430,6 +1477,7 @@ class Tab:
         if not self.needs_render:
             return
 
+        self.browser.measure.time("render")
         start = time.perf_counter()
         style(self.nodes, sorted(self.rules, key=cascade_priority))
         self.document = DocumentLayout(self.nodes)
@@ -1447,6 +1495,7 @@ class Tab:
         self.browser.set_needs_raster_and_draw()
         logging.info("Finished render in %.3f seconds",
                      time.perf_counter() - start)
+        self.browser.measure.stop("render")
 
     def scrolldown(self):
         max_y = max(self.document.height + 2 * VSTEP - self.tab_height, 0)
@@ -1701,6 +1750,7 @@ class Browser:
         self.active_tab_scroll = 0
         self.active_tab_height = 0
         self.active_tab_display_list = None
+        self.measure = MeasureTime()
 
     def clamp_scroll(self, scroll):
         height = self.active_tab_height
@@ -1841,6 +1891,7 @@ class Browser:
     def handle_quit(self):
         for tab in self.tabs:
             tab.task_runner.set_needs_quit()
+        self.measure.finish()
         sdl2.SDL_DestroyWindow(self.sdl_window)
 
     def set_needs_raster_and_draw(self):
@@ -1851,6 +1902,7 @@ class Browser:
             return
 
         self.lock.acquire(blocking=True)
+        self.measure.time("raster_and_draw")
         start = time.perf_counter()
         self.raster_chrome()
         self.raster_tab()
@@ -1858,6 +1910,7 @@ class Browser:
         self.need_raster_and_draw = False
         logging.info("Finished raster and draw in %.3f seconds",
                      time.perf_counter() - start)
+        self.measure.stop("raster_and_draw")
         self.lock.release()
 
     def schedule_animation_frame(self):
