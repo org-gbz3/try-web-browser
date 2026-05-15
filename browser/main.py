@@ -195,6 +195,7 @@ class Text:
         self.children = []
         self.parent = parent
         self.style = {}
+        self.animations = {}
         self.is_focused = False
 
     def __repr__(self) -> str:
@@ -208,6 +209,7 @@ class Element:
         self.children = []
         self.parent = parent
         self.style = {}
+        self.animations = {}
         self.is_focused = False
 
     def __repr__(self) -> str:
@@ -368,14 +370,20 @@ class CSSParser:
                 "Parsing error: expected '{}' at position {}".format(literal, self.i))
         self.i += 1
 
-    def pair(self):
+    def until_chars(self, chars):
+        start = self.i
+        while self.i < len(self.s) and self.s[self.i] not in chars:
+            self.i += 1
+        return self.s[start:self.i]
+
+    def pair(self, until):
         self.whitespace()
         prop = self.word()
         self.whitespace()
         self.literal(":")
         self.whitespace()
-        value = self.word()
-        return prop.casefold(), value
+        value = self.until_chars(until)
+        return prop.casefold(), value.strip()
 
     def ignore_until(self, chars):
         while self.i < len(self.s):
@@ -389,7 +397,7 @@ class CSSParser:
         pairs = {}
         while self.i < len(self.s) and self.s[self.i] != "}":
             try:
-                prop, val = self.pair()
+                prop, val = self.pair([";", "}"])
                 pairs[prop.casefold()] = val
                 self.whitespace()
                 self.literal(";")
@@ -536,6 +544,17 @@ def parse_blend_mode(blend_mode_str):
         return skia.BlendMode.kSrcOver  # デフォルトは通常の合成
 
 
+def parse_transition(value):
+    properties = {}
+    if not value:
+        return properties
+    for item in value.split(","):
+        property, duration = item.split(" ", 1)
+        frames = int(float(duration[:-1]) / REFRESH_RATE_SEC)
+        properties[property] = frames
+    return properties
+
+
 REFRESH_RATE_SEC = .033
 
 
@@ -664,7 +683,9 @@ INHERITED_PROPERTIES = {
 }
 
 
-def style(node, rules):
+def style(node, rules, tab):
+    old_style = node.style
+
     # デフォルトスタイルを適用
     for prop, default_val in INHERITED_PROPERTIES.items():
         if node.parent:
@@ -682,6 +703,7 @@ def style(node, rules):
     # インラインスタイルを適用
     if isinstance(node, Element) and "style" in node.attributes:
         pairs = CSSParser(node.attributes["style"]).body()
+        logging.info("pairs=%s", pairs)
         for prop, val in pairs.items():
             node.style[prop] = val
 
@@ -697,12 +719,55 @@ def style(node, rules):
 
     # 子ノードにスタイルを適用
     for child in node.children:
-        style(child, rules)
+        style(child, rules, tab)
+
+    if old_style:
+        transitions = diff_styles(old_style, node.style)
+        for property, (old_val, new_val, num_frames) in transitions.items():
+            if property == "opacity":
+                tab.set_needs_render()
+                animation = NumericAnimation(old_val, new_val, num_frames)
+                node.animations[property] = animation
+                node.style[property] = animation.animate()
+
+
+def diff_styles(old_style, new_style):
+    transitions = {}
+    for property, num_frames in parse_transition(new_style.get("transition")).items():
+        if property not in old_style:
+            continue
+        if property not in new_style:
+            continue
+        old_value = old_style[property]
+        new_value = new_style[property]
+        if old_value == new_value:
+            continue
+        transitions[property] = (old_value, new_value, num_frames)
+
+    return transitions
 
 
 def cascade_priority(rule):
     selector, _ = rule
     return selector.priority
+
+
+class NumericAnimation:
+    def __init__(self, old_value, new_value, num_frames):
+        self.old_value = float(old_value)
+        self.new_value = float(new_value)
+        self.num_frames = num_frames
+
+        self.frame_count = 1
+        total_change = self.new_value - self.old_value
+        self.change_per_frame = total_change / num_frames
+
+    def animate(self):
+        self.frame_count += 1
+        if self.frame_count >= self.num_frames:
+            return
+        current_value = self.old_value + self.change_per_frame * self.frame_count
+        return str(current_value)
 
 
 WIDTH, HEIGHT = 800, 600
@@ -1574,8 +1639,14 @@ class Tab:
             logging.info("Loaded stylesheet: %s", style_url_s)
         self.set_needs_render()
 
+    def set_needs_layout(self):
+        self.needs_render = True
+        self.needs_layout = True
+        self.browser.set_needs_animation_frame(self)
+
     def set_needs_render(self):
         self.needs_render = True
+        self.needs_style = True
         self.browser.set_needs_animation_frame(self)
 
     def render(self):
@@ -1584,19 +1655,30 @@ class Tab:
 
         self.browser.measure.time("render")
         start = time.perf_counter()
-        style(self.nodes, sorted(self.rules, key=cascade_priority))
-        self.document = DocumentLayout(self.nodes)
-        # print_tree(self.document.node)
-        self.document.layout()
+
+        if self.needs_style:
+            style(self.nodes, sorted(self.rules, key=cascade_priority), self)
+            self.needs_layout = True
+            self.needs_style = False
+
+        if self.needs_layout:
+            self.document = DocumentLayout(self.nodes)
+            # print_tree(self.document.node)
+            self.document.layout()
+            self.needs_paint = True
+            self.needs_layout = False
 
         clamped_scroll = self.clamp_scroll(self.scroll)
         if clamped_scroll != self.scroll:
             self.scroll_changed_in_tab = True
         self.scroll = clamped_scroll
 
-        self.display_list = []
-        paint_tree(self.document, self.display_list)
-        self.needs_render = False
+        if self.needs_paint:
+            self.display_list = []
+            paint_tree(self.document, self.display_list)
+            self.needs_render = False
+            self.needs_paint = False
+
         self.browser.set_needs_composite_raster_and_draw()
         logging.info("Finished render in %.3f seconds",
                      time.perf_counter() - start)
@@ -1628,6 +1710,13 @@ class Tab:
         if not self.scroll_changed_in_tab:
             self.scroll = scroll
         self.js.interp.evaljs("__runRAFHandlers();")
+
+        for node in tree_to_list(self.nodes, []):
+            for (property_name, animation) in node.animations.items():
+                value = animation.animate()
+                if value:
+                    node.style[property_name] = value
+                    self.set_needs_layout()
         self.render()
 
         document_height = math.ceil(self.document.height + 2 * VSTEP)
