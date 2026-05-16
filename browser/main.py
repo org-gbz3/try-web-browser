@@ -1264,6 +1264,9 @@ class VisualEffect:
         self.children = children
         for child in self.children:
             self.rect.join(child.rect)
+        self.needs_compositing = any([
+            child.needs_compositing for child in self.children if isinstance(child, VisualEffect)
+        ])
 
 
 class Blend(VisualEffect):
@@ -1277,6 +1280,8 @@ class Blend(VisualEffect):
         self.rect = skia.Rect.MakeEmpty()
         for cmd in self.children:
             self.rect.join(cmd.rect)
+        if self.should_save:
+            self.needs_compositing = True
 
     def execute(self, canvas):
         paint = skia.Paint(
@@ -1337,6 +1342,9 @@ def add_parent_pointers(nodes, parent=None):
         add_parent_pointers(node.children, node)
 
 
+SHOW_COMPOSITED_LAYER_BORDERS = False
+
+
 class CompositedLayer:
     def __init__(self, skia_context, display_item):
         self.skia_context = skia_context
@@ -1370,6 +1378,16 @@ class CompositedLayer:
         for item in self.display_items:
             item.execute(canvas)
         canvas.restore()
+        if SHOW_COMPOSITED_LAYER_BORDERS:
+            border_rect = skia.Rect.MakeXYWH(
+                1, 1, irect.width() - 2, irect.height() - 2)
+            DrawOutline(border_rect, "red", 1).execute(canvas)
+
+    def add(self, display_item):
+        self.display_items.append(display_item)
+
+    def can_merge(self, display_item):
+        return display_item.parent == self.display_items[0].parent
 
 
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type));"
@@ -2214,6 +2232,20 @@ class Browser:
         for cmd in paint_commands:
             layer = CompositedLayer(self.skia_context, cmd)
             self.composited_layers.append(layer)
+        non_composited_commands = [
+            cmd
+            for cmd in all_commands
+            if isinstance(cmd, PaintCommand) or not cmd.needs_compositing
+            if not (parent := getattr(cmd, 'parent', None)) or getattr(parent, 'needs_compositing', False)
+        ]
+        for cmd in non_composited_commands:
+            for layer in reversed(self.composited_layers):
+                if layer.can_merge(cmd):
+                    layer.add(cmd)
+                    break
+            else:
+                layer = CompositedLayer(self.skia_context, cmd)
+                self.composited_layers.append(layer)
 
     def paint_draw_list(self):
         new_effects = {}
