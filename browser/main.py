@@ -555,6 +555,15 @@ def parse_transition(value):
     return properties
 
 
+def parse_transform(transform_str):
+    if transform_str.find('translate(') < 0:
+        return None
+    left_paren = transform_str.find('(')
+    right_paren = transform_str.find(')')
+    (x_px, y_px) = transform_str[left_paren + 1:right_paren].split(",")
+    return (float(x_px[:-2]), float(y_px[:-2]))
+
+
 REFRESH_RATE_SEC = .033
 
 
@@ -1308,6 +1317,90 @@ class Blend(VisualEffect):
     def clone(self, child):
         return Blend(self.opacity, self.blend_mode, self.node, [child])
 
+    def map(self, rect):
+        if self.children and isinstance(self.children[-1], Blend) and self.children[-1].blend_mode == "destination-in":
+            bounds = rect.makeOffset(0.0, 0.0)
+            bounds.intersect(self.children[-1].rect)
+            return bounds
+        else:
+            return rect
+
+    def unmap(self, rect):
+        return rect
+
+
+class Transform(VisualEffect):
+    def __init__(self, translation, rect, node, children):
+        super().__init__(rect, children, node)
+        self.self_rect = rect
+        self.translation = translation
+
+    def execute(self, canvas):
+        if self.translation:
+            (x, y) = self.translation
+            canvas.save()
+            canvas.translate(x, y)
+        for cmd in self.children:
+            cmd.execute(canvas)
+        if self.translation:
+            canvas.restore()
+
+    def clone(self, child):
+        return Transform(self.translation, self.self_rect, self.node, [child])
+
+    def map(self, rect):
+        return map_translation(rect, self.translation)
+
+    def unmap(self, rect):
+        return map_translation(rect, self.translation, True)
+
+    def __repr__(self):
+        if self.translation:
+            (x, y) = self.translation
+            return "Transform(translate({}, {}))".format(x, y)
+        else:
+            return "Transform(<no-op>)"
+
+
+def absolute_to_local(display_item, rect):
+    parent_chain = []
+    while display_item.parent:
+        parent_chain.append(display_item.parent)
+        display_item = display_item.parent
+    for parent in reversed(parent_chain):
+        rect = parent.unmap(rect)
+    return rect
+
+
+def local_to_absolute(display_item, rect):
+    while display_item.parent:
+        rect = display_item.parent.map(rect)
+        display_item = display_item.parent
+    return rect
+
+
+def map_translation(rect, translation, reversed=False):
+    if not translation:
+        return rect
+    else:
+        (x, y) = translation
+        matrix = skia.Matrix()
+        if reversed:
+            matrix.setTranslate(-x, -y)
+        else:
+            matrix.setTranslate(x, y)
+        return matrix.mapRect(rect)
+
+
+def absolute_bounds_for_obj(obj):
+    rect = skia.Rect.MakeXYWH(obj.x, obj.y, obj.width, obj.height)
+    cur = obj.node
+    while cur:
+        rect = map_translation(rect, parse_transform(
+            cur.style.get("transform", "")))
+        cur = cur.parent
+    return rect
+
 
 def paint_tree(layout_object, display_list):
     cmds = []
@@ -1322,6 +1415,7 @@ def paint_tree(layout_object, display_list):
 
 
 def paint_visual_effects(node, cmds, rect):
+    translation = parse_transform(node.style.get("transform", ""))
     opacity = float(node.style.get("opacity", "1.0"))
     blend_mode = node.style.get("mix-blend-mode")
     if node.style.get("overflow", "visible") == "clip":
@@ -1333,7 +1427,7 @@ def paint_visual_effects(node, cmds, rect):
 
     blend_op = Blend(opacity, blend_mode, node, cmds)
     node.blend_op = blend_op
-    return [blend_op]
+    return [Transform(translation, rect, node, [blend_op])]
 
 
 def add_parent_pointers(nodes, parent=None):
@@ -1354,7 +1448,8 @@ class CompositedLayer:
     def composited_bounds(self):
         rect = skia.Rect.MakeEmpty()
         for item in self.display_items:
-            rect.join(item.rect)
+            rect.join(absolute_to_local(
+                item, local_to_absolute(item, item.rect)))
         rect.outset(1, 1)  # アンチエイリアスのために少し余白を追加
         return rect
 
@@ -1388,6 +1483,12 @@ class CompositedLayer:
 
     def can_merge(self, display_item):
         return display_item.parent == self.display_items[0].parent
+
+    def absolute_bounds(self):
+        rect = skia.Rect.MakeEmpty()
+        for item in self.display_items:
+            rect.join(local_to_absolute(item, item.rect))
+        return rect
 
 
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type));"
@@ -1546,8 +1647,12 @@ class Tab:
         self.render()
 
         # クリック位置で最後の要素からヒットテスト
-        objs = [obj for obj in tree_to_list(self.document, [])
-                if obj.x <= x < obj.x + obj.width and obj.y <= y < obj.y + obj.height]
+        loc_rect = skia.Rect.MakeXYWH(x, y, 1, 1)
+        objs = [
+            obj
+            for obj in tree_to_list(self.document, [])
+            if absolute_bounds_for_obj(obj).intersects(loc_rect)
+        ]
         if not objs:
             return
         elt = objs[-1].node
@@ -2242,6 +2347,10 @@ class Browser:
             for layer in reversed(self.composited_layers):
                 if layer.can_merge(cmd):
                     layer.add(cmd)
+                    break
+                elif skia.Rect.Intersects(layer.absolute_bounds(), local_to_absolute(cmd, cmd.rect)):
+                    layer = CompositedLayer(self.skia_context, cmd)
+                    self.composited_layers.append(layer)
                     break
             else:
                 layer = CompositedLayer(self.skia_context, cmd)
