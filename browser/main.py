@@ -1646,6 +1646,7 @@ class Tab:
         self.scroll_changed_in_tab = False
         self.composited_updates = []
         self.zoom = 1
+        self.dark_mode = browser.dark_mode
 
     def clamp_scroll(self, scroll):
         height = math.ceil(self.document.height + 2 * VSTEP)
@@ -1803,6 +1804,7 @@ class Tab:
         start = time.perf_counter()
 
         if self.needs_style:
+            INHERITED_PROPERTIES["color"] = "white" if self.dark_mode else "black"
             style(self.nodes, sorted(self.rules, key=cascade_priority), self)
             self.needs_layout = True
             self.needs_style = False
@@ -1898,6 +1900,10 @@ class Tab:
         self.scroll_changed_in_tab = True
         self.set_needs_render()
 
+    def set_dark_mode(self, val):
+        self.dark_mode = val
+        self.set_needs_render()
+
 
 class Chrome:
     def __init__(self, browser):
@@ -1950,59 +1956,61 @@ class Chrome:
         )
 
     def paint(self):
+        color = "black" if not self.browser.dark_mode else "white"
+
         cmds = []
         # クロームの背景と区切り線の描画
         cmds.append(DrawRect(skia.Rect.MakeLTRB(
             0, 0, WIDTH, self.bottom), "white"))
-        cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, "black", 1))
+        cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, color, 1))
 
         # タブバーの描画
-        cmds.append(DrawOutline(self.newtab_rect, "black", 1))
+        cmds.append(DrawOutline(self.newtab_rect, color, 1))
         cmds.append(DrawText(
             self.newtab_rect.left() + self.padding,
             self.newtab_rect.top(),
             "+",
             self.font,
-            "black",
+            color,
         ))
         for i, tab in enumerate(self.browser.tabs):
             bounds = self.tab_rect(i)
             cmds.append(DrawLine(bounds.left(), 0, bounds.left(),
-                        bounds.bottom(), "black", 1))
+                        bounds.bottom(), color, 1))
             cmds.append(DrawLine(bounds.right(), 0, bounds.right(),
-                        bounds.bottom(), "black", 1))
+                        bounds.bottom(), color, 1))
             cmds.append(DrawText(
                 bounds.left() + self.padding,
                 bounds.top() + self.padding,
                 "Tab {}".format(i + 1),
                 self.font,
-                "black",
+                color,
             ))
 
             # アクティブなタブ用の追加描画
             if tab == self.browser.active_tab:
                 cmds.append(DrawLine(0, bounds.bottom(), bounds.left(),
-                            bounds.bottom(), "black", 1))
+                            bounds.bottom(), color, 1))
                 cmds.append(DrawLine(bounds.right(), bounds.bottom(), WIDTH,
-                            bounds.bottom(), "black", 1))
+                            bounds.bottom(), color, 1))
 
         # URLバーの描画
-        cmds.append(DrawOutline(self.back_rect, "black", 1))
+        cmds.append(DrawOutline(self.back_rect, color, 1))
         cmds.append(DrawText(
             self.back_rect.left() + self.padding,
             self.back_rect.top(),
             "<",
             self.font,
-            "black",
+            color,
         ))
-        cmds.append(DrawOutline(self.address_rect, "black", 1))
+        cmds.append(DrawOutline(self.address_rect, color, 1))
         if self.focus == "address bar":
             cmds.append(DrawText(
                 self.address_rect.left() + self.padding,
                 self.address_rect.top(),
                 self.address_bar,
                 self.font,
-                "black",
+                color,
             ))
             w = self.font.measureText(self.address_bar)
             cmds.append(DrawLine(
@@ -2021,7 +2029,7 @@ class Chrome:
                 self.address_rect.top(),
                 url,
                 self.font,
-                "black",
+                color,
             ))
 
         return cmds
@@ -2141,6 +2149,7 @@ class Browser:
         self.needs_raster = False
         self.needs_draw = False
         self.focus = None
+        self.dark_mode = False
 
     def set_needs_raster(self):
         self.needs_raster = True
@@ -2194,7 +2203,7 @@ class Browser:
 
     def raster_chrome(self):
         canvas = self.chrome_surface.getCanvas()
-        canvas.clear(skia.ColorWHITE)
+        canvas.clear(skia.ColorBLACK if self.dark_mode else skia.ColorWHITE)
         for cmd in self.chrome.paint():
             cmd.execute(canvas)
 
@@ -2202,7 +2211,7 @@ class Browser:
         assert self.active_tab is not None
 
         canvas = self.root_surface.getCanvas()
-        canvas.clear(skia.ColorWHITE)
+        canvas.clear(skia.ColorBLACK if self.dark_mode else skia.ColorWHITE)
 
         # タブとクロームを合成
         tab_rect = skia.Rect.MakeLTRB(0, self.chrome.bottom, WIDTH, HEIGHT)
@@ -2235,12 +2244,16 @@ class Browser:
     def set_active_tab(self, tab):
         logging.info("Switching to tab with URL: %s", tab.url)
         self.active_tab = tab
+        assert self.active_tab is not None
+
         self.active_tab_scroll = 0
         self.active_tab_url = None
         self.needs_animation_frame = True
         self.animation_timer = None
         self.clear_data()
         self.composited_layers = []
+        task = Task(self.active_tab.set_dark_mode, self.dark_mode)
+        self.active_tab.task_runner.schedule_task(task)
 
     def handle_key(self, char):
         assert self.active_tab is not None
@@ -2433,6 +2446,13 @@ class Browser:
         task = Task(self.active_tab.reset_zoom)
         self.active_tab.task_runner.schedule_task(task)
 
+    def toggle_dark_mode(self):
+        assert self.active_tab is not None
+
+        self.dark_mode = not self.dark_mode
+        task = Task(self.active_tab.set_dark_mode, self.dark_mode)
+        self.active_tab.task_runner.schedule_task(task)
+
 
 def mainloop(browser):
     event = sdl2.SDL_Event()
@@ -2454,6 +2474,8 @@ def mainloop(browser):
                         browser.increment_zoom(False)
                     elif event.key.keysym.sym == sdl2.SDLK_0:
                         browser.reset_zoom()
+                    elif event.key.keysym.sym == sdl2.SDLK_d:
+                        browser.toggle_dark_mode()
                 if event.key.keysym.sym == sdl2.SDLK_RETURN:
                     browser.handle_enter(event.key)
                 elif event.key.keysym.sym == sdl2.SDLK_DOWN:
