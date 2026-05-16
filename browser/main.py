@@ -421,16 +421,41 @@ class CSSParser:
             self.whitespace()
         return out
 
+    def media_query(self):
+        self.literal("@")
+        assert self.word() == "media"
+        self.whitespace()
+        self.literal("(")
+        self.whitespace()
+        prop, val = self.pair([")"])
+        self.whitespace()
+        self.literal(")")
+        return prop, val
+
     def parse(self):
         rules = []
+        media = None
+        self.whitespace()
         while self.i < len(self.s):
             try:
-                self.whitespace()
-                selector = self.selector()
-                self.literal("{")
-                body = self.body()
-                self.literal("}")
-                rules.append((selector, body))
+                if self.s[self.i] == "@" and not media:
+                    prop, val = self.media_query()
+                    if prop == "prefers-color-scheme" and val in ["dark", "light"]:
+                        media = val
+                    self.whitespace()
+                    self.literal("{")
+                    self.whitespace()
+                elif self.s[self.i] == "}" and media:
+                    self.literal("}")
+                    media = None
+                    self.whitespace()
+                else:
+                    self.whitespace()
+                    selector = self.selector()
+                    self.literal("{")
+                    body = self.body()
+                    self.literal("}")
+                    rules.append((media, selector, body))
             except Exception:
                 why = self.ignore_until(["}"])
                 if why == "}":
@@ -703,7 +728,10 @@ def style(node, rules, tab):
             node.style[prop] = default_val
 
     # CSSルールを適用
-    for selector, body in rules:
+    for media, selector, body in rules:
+        if media:
+            if (media == "dark") != tab.dark_mode:
+                continue
         if not selector.matches(node):
             continue
         for prop, val in body.items():
@@ -757,7 +785,7 @@ def diff_styles(old_style, new_style):
 
 
 def cascade_priority(rule):
-    selector, _ = rule
+    _, selector, _ = rule
     return selector.priority
 
 
