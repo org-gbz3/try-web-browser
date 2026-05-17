@@ -229,6 +229,20 @@ def tree_to_list(tree, list):
     return list
 
 
+def is_focusable(node):
+    if get_tabindex(node) < 0:
+        return False
+    elif "tabindex" in node.attributes:
+        return True
+    else:
+        return node.tag in ["input", "button", "a"]
+
+
+def get_tabindex(node):
+    tabindex = int(node.attributes.get("tabindex", "9999999"))
+    return 9999999 if tabindex == 0 else tabindex
+
+
 class HTMLParser:
     SELF_CLOSING_TAGS = [
         "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -1176,7 +1190,7 @@ class InputLayout:
             else:
                 print("Ignoring HTML contents inside button")
                 text = ""
-        if self.node.is_focused:
+        if self.node.is_focused and self.node.tag == "input":
             cx = self.x + self.font.measureText(text)
             cmds.append(DrawLine(cx, self.y, cx,
                         self.y + self.height, "black", 1))
@@ -1702,28 +1716,10 @@ class Tab:
         while elt:
             if isinstance(elt, Text):
                 pass
-            elif elt.tag == "a" and "href" in elt.attributes:
-                if self.js.dispatch_event("click", elt):
-                    return
-                url = self.url.resolve(elt.attributes["href"])
-                return self.load(url)
-            elif elt.tag == "input":
-                if self.js.dispatch_event("click", elt):
-                    return
-                elt.attributes["value"] = ""
-                if self.focus:
-                    self.focus.is_focused = False
-                self.focus = elt
-                elt.is_focused = True
-                self.set_needs_render()
+            elif is_focusable(elt):
+                # self.focus_element(elt)
+                self.activate_element(elt)
                 return
-            elif elt.tag == "button":
-                if self.js.dispatch_event("click", elt):
-                    return
-                while elt:
-                    if elt.tag == "form" and "action" in elt.attributes:
-                        return self.submit_form(elt)
-                    elt = elt.parent
             elt = elt.parent
 
     def submit_form(self, elt):
@@ -1748,6 +1744,7 @@ class Tab:
             cmd.execute(canvas)
 
     def load(self, url, payload=None):
+        self.focus = None
         headers, body = url.request(self.url, payload)
         self.history.append(url)
         self.url = url
@@ -1872,7 +1869,9 @@ class Tab:
             self.load(back)
 
     def keypress(self, char):
-        if self.focus:
+        if self.focus and self.focus.tag == "input":
+            if "value" not in self.focus.attributes:
+                self.activate_element(self.focus)
             if self.js.dispatch_event("keydown", self.focus):
                 return
             self.focus.attributes["value"] += char
@@ -1931,6 +1930,46 @@ class Tab:
     def set_dark_mode(self, val):
         self.dark_mode = val
         self.set_needs_render()
+
+    def advance_tab(self):
+        focusable_nodes = [
+            node
+            for node in tree_to_list(self.nodes, [])
+            if isinstance(node, Element) and is_focusable(node)
+        ]
+        focusable_nodes.sort(key=get_tabindex)
+        if self.focus in focusable_nodes:
+            idx = focusable_nodes.index(self.focus) + 1
+        else:
+            idx = 0
+        if idx < len(focusable_nodes):
+            self.focus = focusable_nodes[idx]
+        else:
+            self.focus = None
+            self.browser.focus_addressbar()
+        self.set_needs_render()
+
+    def enter(self):
+        if not self.focus:
+            return
+        if self.js.dispatch_event("click", self.focus):
+            return
+        self.activate_element(self.focus)
+
+    def activate_element(self, elt):
+        if elt.tag == "input":
+            elt.attributes["value"] = ""
+            self.set_needs_render()
+        elif elt.tag == "a" and "href" in elt.attributes:
+            assert self.url is not None
+
+            url = self.url.resolve(elt.attributes["href"])
+            self.load(url)
+        elif elt.tag == "button":
+            while elt:
+                if elt.tag == "form" and "action" in elt.attributes:
+                    self.submit_form(elt)
+                elt = elt.parent
 
 
 class Chrome:
@@ -2097,6 +2136,10 @@ class Chrome:
 
     def blur(self):
         self.focus = None
+
+    def focus_addressbar(self):
+        self.focus = "address bar"
+        self.address_bar = ""
 
 
 class CommitData:
@@ -2304,7 +2347,19 @@ class Browser:
         self.lock.acquire(blocking=True)
         if self.chrome.enter():
             self.set_needs_raster()
+        elif self.focus == "content":
+            assert self.active_tab is not None
+
+            task = Task(self.active_tab.enter)
+            self.active_tab.task_runner.schedule_task(task)
         self.lock.release()
+
+    def handle_tab(self):
+        self.focus = "content"
+        assert self.active_tab is not None
+
+        task = Task(self.active_tab.advance_tab)
+        self.active_tab.task_runner.schedule_task(task)
 
     def handle_quit(self):
         for tab in self.tabs:
@@ -2481,6 +2536,19 @@ class Browser:
         task = Task(self.active_tab.set_dark_mode, self.dark_mode)
         self.active_tab.task_runner.schedule_task(task)
 
+    def focus_addressbar(self):
+        self.lock.acquire(blocking=True)
+        self.chrome.focus_addressbar()
+        self.set_needs_raster()
+        self.lock.release()
+
+    def cycle_tabs(self):
+        self.lock.acquire(blocking=True)
+        active_idx = self.tabs.index(self.active_tab)
+        new_active_idx = (active_idx + 1) % len(self.tabs)
+        self.set_active_tab(self.tabs[new_active_idx])
+        self.lock.release()
+
 
 def mainloop(browser):
     event = sdl2.SDL_Event()
@@ -2504,8 +2572,23 @@ def mainloop(browser):
                         browser.reset_zoom()
                     elif event.key.keysym.sym == sdl2.SDLK_d:
                         browser.toggle_dark_mode()
+                    elif event.key.keysym.sym == sdl2.SDLK_LEFT:
+                        browser.go_back()
+                    elif event.key.keysym.sym == sdl2.SDLK_l:
+                        browser.focus_addressbar()
+                    elif event.key.keysym.sym == sdl2.SDLK_t:
+                        browser.new_tab("https://browser.engineering/")
+                    elif event.key.keysym.sym == sdl2.SDLK_TAB:
+                        browser.cycle_tabs()
+                    elif event.key.keysym.sym == sdl2.SDLK_q:
+                        browser.handle_quit()
+                        sdl2.SDL_Quit()
+                        sys.exit()
+                        break
                 if event.key.keysym.sym == sdl2.SDLK_RETURN:
                     browser.handle_enter(event.key)
+                elif event.key.keysym.sym == sdl2.SDLK_TAB:
+                    browser.handle_tab()
                 elif event.key.keysym.sym == sdl2.SDLK_DOWN:
                     browser.handle_down(event.key)
                 elif event.key.keysym.sym in {sdl2.SDLK_LCTRL, sdl2.SDLK_RCTRL}:
