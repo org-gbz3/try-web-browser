@@ -425,12 +425,20 @@ class CSSParser:
                     break
         return pairs
 
-    def selector(self):
+    def simple_selector(self):
         out = Tagselector(self.word().casefold())
+        if self.i < len(self.s) and self.s[self.i] == ":":
+            self.literal(":")
+            pseudoclass = self.word().casefold()
+            out = PseudoclassSelector(pseudoclass, out)
+        return out
+
+    def selector(self):
+        out = self.simple_selector()
         self.whitespace()
         while self.i < len(self.s) and self.s[self.i] != "{":
-            tag = self.word()
-            descendant = Tagselector(tag.casefold())
+            # tag = self.word()
+            descendant = self.simple_selector()
             out = DescendantSelector(out, descendant)
             self.whitespace()
         return out
@@ -509,6 +517,21 @@ class DescendantSelector:
 
     def __repr__(self) -> str:
         return "<DescendantSelector {} {}>".format(self.anncestor, self.descendant)
+
+
+class PseudoclassSelector:
+    def __init__(self, pseudoclass, base):
+        self.pseudoclass = pseudoclass
+        self.base = base
+        self.priority = self.base.priority
+
+    def matches(self, node):
+        if not self.base.matches(node):
+            return False
+        if self.pseudoclass == "focus":
+            return node.is_focused
+        else:
+            return False
 
 
 FONTS = {}
@@ -601,6 +624,17 @@ def parse_transform(transform_str):
     right_paren = transform_str.find(')')
     (x_px, y_px) = transform_str[left_paren + 1:right_paren].split(",")
     return (float(x_px[:-2]), float(y_px[:-2]))
+
+
+def parse_outline(outline_str):
+    if not outline_str:
+        return None
+    values = outline_str.split(" ")
+    if len(values) != 3:
+        return None
+    if values[1] != "solid":
+        return None
+    return int(values[0][:-2]), values[2]
 
 
 REFRESH_RATE_SEC = .033
@@ -1093,6 +1127,15 @@ class LineLayout:
         return []
 
     def paint_effects(self, cmds):
+        outline_rect = skia.Rect.MakeEmpty()
+        outline_node = None
+        for child in self.children:
+            outline_str = child.node.parent.style.get("outline")
+            if parse_outline(outline_str):
+                outline_rect.join(child.self_rect())
+                outline_node = child.node.parent
+        if outline_node:
+            paint_outline(outline_node, cmds, outline_rect, self.zoom)
         return cmds
 
 
@@ -1104,6 +1147,14 @@ class TextLayout:
         self.previous = previous
         self.children = []
         self.y = 0  # LineLayout.layout() で配置されるまでの仮の値
+
+    def self_rect(self):
+        return skia.Rect.MakeLTRB(
+            self.x,
+            self.y,
+            self.x + self.width,
+            self.y + self.height,
+        )
 
     def should_paint(self):
         return True
@@ -1199,6 +1250,8 @@ class InputLayout:
         return cmds
 
     def paint_effects(self, cmds):
+        cmds = paint_visual_effects(self.node, cmds, self.self_rect())
+        paint_outline(self.node, cmds, self.self_rect(), self.zoom)
         return cmds
 
 
@@ -1485,6 +1538,14 @@ def paint_visual_effects(node, cmds, rect):
     return [Transform(translation, rect, node, [blend_op])]
 
 
+def paint_outline(node, cmds, rect, zoom):
+    outline = parse_outline(node.style.get("outline"))
+    if not outline:
+        return
+    thickness, color = outline
+    cmds.append(DrawOutline(rect, color, dpx(thickness, zoom)))
+
+
 def add_parent_pointers(nodes, parent=None):
     for node in nodes:
         node.parent = parent
@@ -1689,6 +1750,7 @@ class Tab:
         self.composited_updates = []
         self.zoom = 1
         self.dark_mode = browser.dark_mode
+        self.needs_focus_scroll = False
 
     def clamp_scroll(self, scroll):
         height = math.ceil(self.document.height + 2 * VSTEP)
@@ -1717,7 +1779,7 @@ class Tab:
             if isinstance(elt, Text):
                 pass
             elif is_focusable(elt):
-                # self.focus_element(elt)
+                self.focus_element(elt)
                 self.activate_element(elt)
                 return
             elt = elt.parent
@@ -1891,6 +1953,10 @@ class Tab:
 
         needs_composite = self.needs_style or self.needs_layout
 
+        if self.needs_focus_scroll and self.focus:
+            self.scroll_to(self.focus)
+        self.needs_focus_scroll = False
+
         self.render()
 
         composited_updates = None
@@ -1943,8 +2009,9 @@ class Tab:
         else:
             idx = 0
         if idx < len(focusable_nodes):
-            self.focus = focusable_nodes[idx]
+            self.focus_element(focusable_nodes[idx])
         else:
+            self.focus_element(None)
             self.focus = None
             self.browser.focus_addressbar()
         self.set_needs_render()
@@ -1970,6 +2037,33 @@ class Tab:
                 if elt.tag == "form" and "action" in elt.attributes:
                     self.submit_form(elt)
                 elt = elt.parent
+
+    def focus_element(self, node):
+        if node and node != self.focus:
+            self.needs_focus_scroll = True
+        if self.focus:
+            self.focus.is_focused = False
+        self.focus = node
+        if node:
+            node.is_focused = True
+            self.set_needs_render()
+
+    def scroll_to(self, elt):
+        objs = [
+            obj
+            for obj in tree_to_list(self.document, [])
+            if obj.node == self.focus
+        ]
+        if not objs:
+            return
+        obj = objs[0]
+        if self.scroll < obj.y < self.scroll + self.tab_height:
+            return
+
+        # document_height = math.ceil(self.document.height + 2 * VSTEP)
+        new_scroll = obj.y - SCROLL_STEP
+        self.scroll = self.clamp_scroll(new_scroll)
+        self.scroll_changed_in_tab = True
 
 
 class Chrome:
@@ -2378,8 +2472,8 @@ class Browser:
             self.measure.time("composite")
             start = time.perf_counter()
             self.composite()
-            logging.info("Finished composite in %.3f sec",
-                         time.perf_counter() - start)
+            # logging.info("Finished composite in %.3f sec",
+            #              time.perf_counter() - start)
             self.measure.stop("composite")
 
         if self.needs_raster:
@@ -2387,8 +2481,8 @@ class Browser:
             start = time.perf_counter()
             self.raster_chrome()
             self.raster_tab()
-            logging.info("Finished raster in %.3f sec",
-                         time.perf_counter() - start)
+            # logging.info("Finished raster in %.3f sec",
+            #              time.perf_counter() - start)
             self.measure.stop("raster")
 
         if self.needs_draw:
@@ -2396,8 +2490,8 @@ class Browser:
             start = time.perf_counter()
             self.paint_draw_list()
             self.draw()
-            logging.info("Finished draw in %.3f sec",
-                         time.perf_counter() - start)
+            # logging.info("Finished draw in %.3f sec",
+            #              time.perf_counter() - start)
             self.measure.stop("draw")
 
         self.lock.release()
