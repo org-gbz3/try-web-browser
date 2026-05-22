@@ -229,6 +229,20 @@ def tree_to_list(tree, list):
     return list
 
 
+def is_focusable(node):
+    if get_tabindex(node) < 0:
+        return False
+    elif "tabindex" in node.attributes:
+        return True
+    else:
+        return node.tag in ["input", "button", "a"]
+
+
+def get_tabindex(node):
+    tabindex = int(node.attributes.get("tabindex", "9999999"))
+    return 9999999 if tabindex == 0 else tabindex
+
+
 class HTMLParser:
     SELF_CLOSING_TAGS = [
         "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -421,16 +435,41 @@ class CSSParser:
             self.whitespace()
         return out
 
+    def media_query(self):
+        self.literal("@")
+        assert self.word() == "media"
+        self.whitespace()
+        self.literal("(")
+        self.whitespace()
+        prop, val = self.pair([")"])
+        self.whitespace()
+        self.literal(")")
+        return prop, val
+
     def parse(self):
         rules = []
+        media = None
+        self.whitespace()
         while self.i < len(self.s):
             try:
-                self.whitespace()
-                selector = self.selector()
-                self.literal("{")
-                body = self.body()
-                self.literal("}")
-                rules.append((selector, body))
+                if self.s[self.i] == "@" and not media:
+                    prop, val = self.media_query()
+                    if prop == "prefers-color-scheme" and val in ["dark", "light"]:
+                        media = val
+                    self.whitespace()
+                    self.literal("{")
+                    self.whitespace()
+                elif self.s[self.i] == "}" and media:
+                    self.literal("}")
+                    media = None
+                    self.whitespace()
+                else:
+                    self.whitespace()
+                    selector = self.selector()
+                    self.literal("{")
+                    body = self.body()
+                    self.literal("}")
+                    rules.append((media, selector, body))
             except Exception:
                 why = self.ignore_until(["}"])
                 if why == "}":
@@ -703,7 +742,10 @@ def style(node, rules, tab):
             node.style[prop] = default_val
 
     # CSSルールを適用
-    for selector, body in rules:
+    for media, selector, body in rules:
+        if media:
+            if (media == "dark") != tab.dark_mode:
+                continue
         if not selector.matches(node):
             continue
         for prop, val in body.items():
@@ -757,7 +799,7 @@ def diff_styles(old_style, new_style):
 
 
 def cascade_priority(rule):
-    selector, _ = rule
+    _, selector, _ = rule
     return selector.priority
 
 
@@ -777,6 +819,10 @@ class NumericAnimation:
             return
         current_value = self.old_value + self.change_per_frame * self.frame_count
         return str(current_value)
+
+
+def dpx(css_px, zoom):
+    return css_px * zoom
 
 
 WIDTH, HEIGHT = 800, 600
@@ -804,15 +850,16 @@ class DocumentLayout:
     def should_paint(self):
         return True
 
-    def layout(self):
+    def layout(self, zoom):
+        self.zoom = zoom
         child = BlockLayout(self.node, self, None)
         self.children.append(child)
 
         # 幅は親から子へトップダウンで計算
         # 高さは子から親へボトムアップで計算
-        self.width = WIDTH - 2 * HSTEP
-        self.x = HSTEP
-        self.y = VSTEP
+        self.width = WIDTH - 2 * dpx(HSTEP, self.zoom)
+        self.x = dpx(HSTEP, self.zoom)
+        self.y = dpx(VSTEP, self.zoom)
         child.layout()
         self.height = child.height
 
@@ -850,6 +897,7 @@ class BlockLayout:
         return isinstance(self.node, Text) or (self.node.tag != "input" and self.node.tag != "button")
 
     def layout(self):
+        self.zoom = self.parent.zoom
         self.x = self.parent.x
         self.width = self.parent.width
         if self.previous:
@@ -887,7 +935,7 @@ class BlockLayout:
                     self.recurse(child)
 
     def input(self, node):
-        w = INPUT_WIDTH_PX
+        w = dpx(INPUT_WIDTH_PX, self.zoom)
         if self.cursor_x + w > self.width:
             self.new_line()
         line = self.children[-1]
@@ -899,7 +947,8 @@ class BlockLayout:
         style = node.style["font-style"]
         if style == "normal":
             style = "roman"
-        size = int(float(node.style["font-size"][:-2]) * .75)
+        px_size = float(node.style["font-size"][:-2])
+        size = dpx(px_size * 0.75, self.zoom)
         font = get_font(size, weight, style)
 
         self.cursor_x += w + font.measureText(" ")
@@ -933,7 +982,8 @@ class BlockLayout:
         if style == "normal":
             style = "roman"
         # レディングを考慮してフォントサイズを縮小
-        size = int(float(node.style["font-size"][:-2]) * .75)
+        px_size = float(node.style["font-size"][:-2])
+        size = dpx(px_size * 0.75, self.zoom)
 
         font = get_font(size, weight, style)
         w = font.measureText(word)
@@ -1006,6 +1056,7 @@ class LineLayout:
         return True
 
     def layout(self):
+        self.zoom = self.parent.zoom
         self.width = self.parent.width
         self.x = self.parent.x
         if self.previous:
@@ -1058,11 +1109,13 @@ class TextLayout:
         return True
 
     def layout(self):
+        self.zoom = self.parent.zoom
         weight = self.node.style["font-weight"]
         style = self.node.style["font-style"]
         if style == "normal":
             style = "roman"
-        size = int(float(self.node.style["font-size"][:-2]) * .75)
+        px_size = float(self.node.style["font-size"][:-2])
+        size = dpx(px_size * 0.75, self.zoom)
 
         self.font = get_font(size, weight, style)
         self.width = self.font.measureText(self.word)
@@ -1104,11 +1157,13 @@ class InputLayout:
         return True
 
     def layout(self):
+        self.zoom = self.parent.zoom
         weight = self.node.style["font-weight"]
         style = self.node.style["font-style"]
         if style == "normal":
             style = "roman"
-        size = int(float(self.node.style["font-size"][:-2]) * .75)
+        px_size = float(self.node.style["font-size"][:-2])
+        size = dpx(px_size * 0.75, self.zoom)
 
         self.font = get_font(size, weight, style)
         self.width = INPUT_WIDTH_PX
@@ -1135,7 +1190,7 @@ class InputLayout:
             else:
                 print("Ignoring HTML contents inside button")
                 text = ""
-        if self.node.is_focused:
+        if self.node.is_focused and self.node.tag == "input":
             cx = self.x + self.font.measureText(text)
             cmds.append(DrawLine(cx, self.y, cx,
                         self.y + self.height, "black", 1))
@@ -1632,6 +1687,8 @@ class Tab:
         self.browser = browser
         self.scroll_changed_in_tab = False
         self.composited_updates = []
+        self.zoom = 1
+        self.dark_mode = browser.dark_mode
 
     def clamp_scroll(self, scroll):
         height = math.ceil(self.document.height + 2 * VSTEP)
@@ -1659,28 +1716,10 @@ class Tab:
         while elt:
             if isinstance(elt, Text):
                 pass
-            elif elt.tag == "a" and "href" in elt.attributes:
-                if self.js.dispatch_event("click", elt):
-                    return
-                url = self.url.resolve(elt.attributes["href"])
-                return self.load(url)
-            elif elt.tag == "input":
-                if self.js.dispatch_event("click", elt):
-                    return
-                elt.attributes["value"] = ""
-                if self.focus:
-                    self.focus.is_focused = False
-                self.focus = elt
-                elt.is_focused = True
-                self.set_needs_render()
+            elif is_focusable(elt):
+                # self.focus_element(elt)
+                self.activate_element(elt)
                 return
-            elif elt.tag == "button":
-                if self.js.dispatch_event("click", elt):
-                    return
-                while elt:
-                    if elt.tag == "form" and "action" in elt.attributes:
-                        return self.submit_form(elt)
-                    elt = elt.parent
             elt = elt.parent
 
     def submit_form(self, elt):
@@ -1705,9 +1744,11 @@ class Tab:
             cmd.execute(canvas)
 
     def load(self, url, payload=None):
+        self.focus = None
         headers, body = url.request(self.url, payload)
         self.history.append(url)
         self.url = url
+        self.zoom = 1
         self.scroll_changed_in_tab = True
         logging.info("Received response: %d bytes", len(body))
 
@@ -1788,6 +1829,7 @@ class Tab:
         start = time.perf_counter()
 
         if self.needs_style:
+            INHERITED_PROPERTIES["color"] = "white" if self.dark_mode else "black"
             style(self.nodes, sorted(self.rules, key=cascade_priority), self)
             self.needs_layout = True
             self.needs_style = False
@@ -1795,7 +1837,7 @@ class Tab:
         if self.needs_layout:
             self.document = DocumentLayout(self.nodes)
             # print_tree(self.document.node)
-            self.document.layout()
+            self.document.layout(self.zoom)
             self.needs_paint = True
             self.needs_layout = False
 
@@ -1827,7 +1869,9 @@ class Tab:
             self.load(back)
 
     def keypress(self, char):
-        if self.focus:
+        if self.focus and self.focus.tag == "input":
+            if "value" not in self.focus.attributes:
+                self.activate_element(self.focus)
             if self.js.dispatch_event("keydown", self.focus):
                 return
             self.focus.attributes["value"] += char
@@ -1866,6 +1910,66 @@ class Tab:
         self.display_list = []
         self.browser.commit(self, commit_data)
         self.scroll_changed_in_tab = False
+
+    def zoom_by(self, increment):
+        if increment:
+            self.zoom *= 1.1
+            self.scroll *= 1.1
+        else:
+            self.zoom *= 1/1.1
+            self.scroll *= 1/1.1
+        self.scroll_changed_in_tab = True
+        self.set_needs_render()
+
+    def reset_zoom(self):
+        self.scroll /= self.zoom
+        self.zoom = 1
+        self.scroll_changed_in_tab = True
+        self.set_needs_render()
+
+    def set_dark_mode(self, val):
+        self.dark_mode = val
+        self.set_needs_render()
+
+    def advance_tab(self):
+        focusable_nodes = [
+            node
+            for node in tree_to_list(self.nodes, [])
+            if isinstance(node, Element) and is_focusable(node)
+        ]
+        focusable_nodes.sort(key=get_tabindex)
+        if self.focus in focusable_nodes:
+            idx = focusable_nodes.index(self.focus) + 1
+        else:
+            idx = 0
+        if idx < len(focusable_nodes):
+            self.focus = focusable_nodes[idx]
+        else:
+            self.focus = None
+            self.browser.focus_addressbar()
+        self.set_needs_render()
+
+    def enter(self):
+        if not self.focus:
+            return
+        if self.js.dispatch_event("click", self.focus):
+            return
+        self.activate_element(self.focus)
+
+    def activate_element(self, elt):
+        if elt.tag == "input":
+            elt.attributes["value"] = ""
+            self.set_needs_render()
+        elif elt.tag == "a" and "href" in elt.attributes:
+            assert self.url is not None
+
+            url = self.url.resolve(elt.attributes["href"])
+            self.load(url)
+        elif elt.tag == "button":
+            while elt:
+                if elt.tag == "form" and "action" in elt.attributes:
+                    self.submit_form(elt)
+                elt = elt.parent
 
 
 class Chrome:
@@ -1919,59 +2023,61 @@ class Chrome:
         )
 
     def paint(self):
+        color = "black" if not self.browser.dark_mode else "white"
+
         cmds = []
         # クロームの背景と区切り線の描画
         cmds.append(DrawRect(skia.Rect.MakeLTRB(
             0, 0, WIDTH, self.bottom), "white"))
-        cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, "black", 1))
+        cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, color, 1))
 
         # タブバーの描画
-        cmds.append(DrawOutline(self.newtab_rect, "black", 1))
+        cmds.append(DrawOutline(self.newtab_rect, color, 1))
         cmds.append(DrawText(
             self.newtab_rect.left() + self.padding,
             self.newtab_rect.top(),
             "+",
             self.font,
-            "black",
+            color,
         ))
         for i, tab in enumerate(self.browser.tabs):
             bounds = self.tab_rect(i)
             cmds.append(DrawLine(bounds.left(), 0, bounds.left(),
-                        bounds.bottom(), "black", 1))
+                        bounds.bottom(), color, 1))
             cmds.append(DrawLine(bounds.right(), 0, bounds.right(),
-                        bounds.bottom(), "black", 1))
+                        bounds.bottom(), color, 1))
             cmds.append(DrawText(
                 bounds.left() + self.padding,
                 bounds.top() + self.padding,
                 "Tab {}".format(i + 1),
                 self.font,
-                "black",
+                color,
             ))
 
             # アクティブなタブ用の追加描画
             if tab == self.browser.active_tab:
                 cmds.append(DrawLine(0, bounds.bottom(), bounds.left(),
-                            bounds.bottom(), "black", 1))
+                            bounds.bottom(), color, 1))
                 cmds.append(DrawLine(bounds.right(), bounds.bottom(), WIDTH,
-                            bounds.bottom(), "black", 1))
+                            bounds.bottom(), color, 1))
 
         # URLバーの描画
-        cmds.append(DrawOutline(self.back_rect, "black", 1))
+        cmds.append(DrawOutline(self.back_rect, color, 1))
         cmds.append(DrawText(
             self.back_rect.left() + self.padding,
             self.back_rect.top(),
             "<",
             self.font,
-            "black",
+            color,
         ))
-        cmds.append(DrawOutline(self.address_rect, "black", 1))
+        cmds.append(DrawOutline(self.address_rect, color, 1))
         if self.focus == "address bar":
             cmds.append(DrawText(
                 self.address_rect.left() + self.padding,
                 self.address_rect.top(),
                 self.address_bar,
                 self.font,
-                "black",
+                color,
             ))
             w = self.font.measureText(self.address_bar)
             cmds.append(DrawLine(
@@ -1990,7 +2096,7 @@ class Chrome:
                 self.address_rect.top(),
                 url,
                 self.font,
-                "black",
+                color,
             ))
 
         return cmds
@@ -2030,6 +2136,10 @@ class Chrome:
 
     def blur(self):
         self.focus = None
+
+    def focus_addressbar(self):
+        self.focus = "address bar"
+        self.address_bar = ""
 
 
 class CommitData:
@@ -2109,6 +2219,8 @@ class Browser:
         self.needs_composite = False
         self.needs_raster = False
         self.needs_draw = False
+        self.focus = None
+        self.dark_mode = False
 
     def set_needs_raster(self):
         self.needs_raster = True
@@ -2162,7 +2274,7 @@ class Browser:
 
     def raster_chrome(self):
         canvas = self.chrome_surface.getCanvas()
-        canvas.clear(skia.ColorWHITE)
+        canvas.clear(skia.ColorBLACK if self.dark_mode else skia.ColorWHITE)
         for cmd in self.chrome.paint():
             cmd.execute(canvas)
 
@@ -2170,7 +2282,7 @@ class Browser:
         assert self.active_tab is not None
 
         canvas = self.root_surface.getCanvas()
-        canvas.clear(skia.ColorWHITE)
+        canvas.clear(skia.ColorBLACK if self.dark_mode else skia.ColorWHITE)
 
         # タブとクロームを合成
         tab_rect = skia.Rect.MakeLTRB(0, self.chrome.bottom, WIDTH, HEIGHT)
@@ -2203,12 +2315,16 @@ class Browser:
     def set_active_tab(self, tab):
         logging.info("Switching to tab with URL: %s", tab.url)
         self.active_tab = tab
+        assert self.active_tab is not None
+
         self.active_tab_scroll = 0
         self.active_tab_url = None
         self.needs_animation_frame = True
         self.animation_timer = None
         self.clear_data()
         self.composited_layers = []
+        task = Task(self.active_tab.set_dark_mode, self.dark_mode)
+        self.active_tab.task_runner.schedule_task(task)
 
     def handle_key(self, char):
         assert self.active_tab is not None
@@ -2231,7 +2347,19 @@ class Browser:
         self.lock.acquire(blocking=True)
         if self.chrome.enter():
             self.set_needs_raster()
+        elif self.focus == "content":
+            assert self.active_tab is not None
+
+            task = Task(self.active_tab.enter)
+            self.active_tab.task_runner.schedule_task(task)
         self.lock.release()
+
+    def handle_tab(self):
+        self.focus = "content"
+        assert self.active_tab is not None
+
+        task = Task(self.active_tab.advance_tab)
+        self.active_tab.task_runner.schedule_task(task)
 
     def handle_quit(self):
         for tab in self.tabs:
@@ -2389,9 +2517,43 @@ class Browser:
         self.display_list = []
         self.composited_updates = {}
 
+    def increment_zoom(self, increment):
+        assert self.active_tab is not None
+
+        task = Task(self.active_tab.zoom_by, increment)
+        self.active_tab.task_runner.schedule_task(task)
+
+    def reset_zoom(self):
+        assert self.active_tab is not None
+
+        task = Task(self.active_tab.reset_zoom)
+        self.active_tab.task_runner.schedule_task(task)
+
+    def toggle_dark_mode(self):
+        assert self.active_tab is not None
+
+        self.dark_mode = not self.dark_mode
+        task = Task(self.active_tab.set_dark_mode, self.dark_mode)
+        self.active_tab.task_runner.schedule_task(task)
+
+    def focus_addressbar(self):
+        self.lock.acquire(blocking=True)
+        self.chrome.focus_addressbar()
+        self.set_needs_raster()
+        self.lock.release()
+
+    def cycle_tabs(self):
+        self.lock.acquire(blocking=True)
+        active_idx = self.tabs.index(self.active_tab)
+        new_active_idx = (active_idx + 1) % len(self.tabs)
+        self.set_active_tab(self.tabs[new_active_idx])
+        self.lock.release()
+
 
 def mainloop(browser):
     event = sdl2.SDL_Event()
+    ctrl_down = False
+    shift_down = False
     while True:
         while sdl2.SDL_PollEvent(ctypes.byref(event)) != 0:
             if event.type == sdl2.SDL_QUIT:
@@ -2401,10 +2563,43 @@ def mainloop(browser):
             elif event.type == sdl2.SDL_MOUSEBUTTONUP:
                 browser.handle_click(event.button)
             elif event.type == sdl2.SDL_KEYDOWN:
+                if ctrl_down:
+                    if shift_down and event.key.keysym.sym == sdl2.SDLK_SEMICOLON:  # 日本語キーボードで '+'
+                        browser.increment_zoom(True)
+                    elif event.key.keysym.sym == sdl2.SDLK_MINUS:
+                        browser.increment_zoom(False)
+                    elif event.key.keysym.sym == sdl2.SDLK_0:
+                        browser.reset_zoom()
+                    elif event.key.keysym.sym == sdl2.SDLK_d:
+                        browser.toggle_dark_mode()
+                    elif event.key.keysym.sym == sdl2.SDLK_LEFT:
+                        browser.go_back()
+                    elif event.key.keysym.sym == sdl2.SDLK_l:
+                        browser.focus_addressbar()
+                    elif event.key.keysym.sym == sdl2.SDLK_t:
+                        browser.new_tab("https://browser.engineering/")
+                    elif event.key.keysym.sym == sdl2.SDLK_TAB:
+                        browser.cycle_tabs()
+                    elif event.key.keysym.sym == sdl2.SDLK_q:
+                        browser.handle_quit()
+                        sdl2.SDL_Quit()
+                        sys.exit()
+                        break
                 if event.key.keysym.sym == sdl2.SDLK_RETURN:
                     browser.handle_enter(event.key)
+                elif event.key.keysym.sym == sdl2.SDLK_TAB:
+                    browser.handle_tab()
                 elif event.key.keysym.sym == sdl2.SDLK_DOWN:
                     browser.handle_down(event.key)
+                elif event.key.keysym.sym in {sdl2.SDLK_LCTRL, sdl2.SDLK_RCTRL}:
+                    ctrl_down = True
+                elif event.key.keysym.sym in {sdl2.SDLK_LSHIFT, sdl2.SDLK_RSHIFT}:
+                    shift_down = True
+            elif event.type == sdl2.SDL_KEYUP:
+                if event.key.keysym.sym in {sdl2.SDLK_LCTRL, sdl2.SDLK_RCTRL}:
+                    ctrl_down = False
+                elif event.key.keysym.sym in {sdl2.SDLK_LSHIFT, sdl2.SDLK_RSHIFT}:
+                    shift_down = False
             elif event.type == sdl2.SDL_TEXTINPUT:
                 browser.handle_key(event.text.text.decode("utf-8"))
         browser.composite_raster_and_draw()
