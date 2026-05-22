@@ -3,6 +3,7 @@ import base64
 import ctypes
 import logging
 import math
+import os
 import socket
 import threading
 import time
@@ -98,14 +99,14 @@ class URL:
 
         s.send(request.encode("utf8"))
 
-        response = s.makefile("r", encoding="utf8", newline="\r\n")
+        response = s.makefile("rb")
 
-        statusline = response.readline()
+        statusline = response.readline().decode("utf8")
         version, status, explanation = statusline.split(" ", 2)
 
         response_headers = {}
         while True:
-            line = response.readline()
+            line = response.readline().decode("utf8")
             if line == "\r\n":
                 break
 
@@ -211,6 +212,8 @@ class Element:
         self.style = {}
         self.animations = {}
         self.is_focused = False
+        self.encoded_data = None
+        self.image = None
 
     def __repr__(self) -> str:
         return "<{}>".format(self.tag)
@@ -635,6 +638,15 @@ def parse_outline(outline_str):
     if values[1] != "solid":
         return None
     return int(values[0][:-2]), values[2]
+
+
+def parse_image_rendering(quality):
+    if quality == "high-quality":
+        return skia.FilterQuality.kHigh_FilterQuality
+    elif quality == "crisp-edges":
+        return skia.FilterQuality.kLow_FilterQuality
+    else:
+        return skia.FilterQuality.kMedium_FilterQuality  # デフォルトは中品質
 
 
 REFRESH_RATE_SEC = .033
@@ -1255,6 +1267,11 @@ class InputLayout:
         return cmds
 
 
+BROKEN_IMAGE = skia.Image.open(
+    os.path.join(os.path.dirname(__file__), "Broken_Image.png")
+)
+
+
 class PaintCommand:
     def __init__(self, rect):
         self.rect = rect
@@ -1372,6 +1389,19 @@ class DrawCompositedLayer(PaintCommand):
 
     def __repr__(self):
         return "DrawCompositedLayer()"
+
+
+class DrawImage(PaintCommand):
+    def __init__(self, image, rect, quality) -> None:
+        super().__init__(rect)
+        self.image = image
+        self.quality = parse_image_rendering(quality)
+
+    def execute(self, canvas):
+        paint = skia.Paint(
+            FilterQuality=self.quality,
+        )
+        canvas.drawImageRect(self.image, self.rect, paint)
 
 
 class VisualEffect:
@@ -1697,6 +1727,7 @@ class JSContext:
 
         def run_load():
             headers, response = full_url.request(self.tab.url, body)
+            response = response.decode("utf8")
             task = Task(self.dispatch_xhr_onload, response, handle)
             self.tab.task_runner.schedule_task(task)
             return response
@@ -1808,6 +1839,7 @@ class Tab:
     def load(self, url, payload=None):
         self.focus = None
         headers, body = url.request(self.url, payload)
+        body = body.decode("utf8", "replace")
         self.history.append(url)
         self.url = url
         self.zoom = 1
@@ -1843,6 +1875,7 @@ class Tab:
                 continue
             try:
                 header, body = script_url.request(url)
+                body = body.decode("utf8")
             except Exception:
                 logging.warning("Failed to load script: %s", script_url_s)
                 continue
@@ -1862,11 +1895,33 @@ class Tab:
                 style_url)
             try:
                 header, body = style_url.request(url)
+                body = body.decode("utf8")
             except Exception:
                 logging.warning("Failed to load stylesheet: %s", style_url_s)
                 continue
             self.rules.extend(CSSParser(body).parse())
             logging.info("Loaded stylesheet: %s", style_url_s)
+
+        # 画像を読み込む
+        images = [
+            node
+            for node in tree_to_list(self.nodes, [])
+            if isinstance(node, Element) and node.tag == "img"
+        ]
+        for img in images:
+            src = img.attributes.get("src", "")
+            image_url = url.resolve(src)
+            assert self.allowed_request(
+                image_url), "Blocked load of " + str(image_url) + " due to CSP"
+            try:
+                header, body = image_url.request(url)
+                img.encoded_data = body
+                data = skia.Data.MakeWithoutCopy(body)
+                img.image = skia.Image.MakeFromEncoded(data)
+            except Exception as e:
+                print("Image", image_url, "crashed", e)
+                img.image = BROKEN_IMAGE
+
         self.set_needs_render()
 
     def set_needs_layout(self):
