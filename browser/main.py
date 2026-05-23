@@ -991,7 +991,12 @@ class BlockLayout:
                     self.recurse(child)
 
     def image(self, node):
-        w = dpx(node.image.width(), self.zoom)
+        if "width" in node.attributes:
+            w = dpx(int(node.attributes["width"]), self.zoom)
+        elif node.image:
+            w = dpx(node.image.width(), self.zoom)
+        else:
+            return
         self.add_inline_child(node, w, ImageLayout)
 
     def input(self, node):
@@ -1284,8 +1289,26 @@ class ImageLayout(EmbedLayout):
 
     def layout(self):
         super().layout()
-        self.width = dpx(self.node.image.width(), self.zoom)
-        self.img_height = dpx(self.node.image.height(), self.zoom)
+
+        width_attr = self.node.attributes.get("width")
+        height_attr = self.node.attributes.get("height")
+        image_width = self.node.image.width()
+        image_height = self.node.image.height()
+        aspect_ratio = image_width / image_height
+
+        if width_attr and height_attr:
+            self.width = dpx(int(width_attr), self.zoom)
+            self.img_height = dpx(int(height_attr), self.zoom)
+        elif width_attr:
+            self.width = dpx(int(width_attr), self.zoom)
+            self.img_height = self.width / aspect_ratio
+        elif height_attr:
+            self.img_height = dpx(int(height_attr), self.zoom)
+            self.width = self.img_height * aspect_ratio
+        else:
+            self.width = dpx(image_width, self.zoom)
+            self.img_height = dpx(image_height, self.zoom)
+
         self.height = max(self.img_height, linespace(self.font))
         self.ascent = -self.height
         self.descent = 0
